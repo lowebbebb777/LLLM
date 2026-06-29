@@ -1,0 +1,18 @@
+# VariationalLoRA 依存 (SPEC §6.4)
+# torch は CUDA 12.x 対応版を別途インストールすること (環境依存のためバージョン未固定):
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+# bitsandbytes は CUDA バージョン整合に注意 (Windows 側は別途確認)。
+# 環境によっては pip install 時に --break-system-packages が必要。
+
+torch>=2.1
+transformers>=4.44
+peft>=0.11
+bitsandbytes>=0.43
+accelerate>=0.30
+trl>=0.9
+datasets>=2.19
+pyyaml>=6.0
+numpy>=1.24
+
+# 評価 (任意): HumanEval 公式ハーネスを使う場合
+# human-eval @ git+https://github.com/openai/human-eval.git
