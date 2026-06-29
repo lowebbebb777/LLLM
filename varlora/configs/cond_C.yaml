@@ -1,0 +1,33 @@
+# 条件 C: VariationalLoRA (ゲート動的) — 実験群 / 本仮説 (SPEC §4.2)
+condition: C
+
+model_name: Qwen/Qwen2.5-Coder-7B
+dataset: data/m0_smoke.jsonl
+text_field: text
+max_seq_length: 1024
+output_dir: outputs/cond_C
+
+# アダプタ (VariationalLoRA)
+r0: 16
+alpha: 32
+lora_dropout: 0.05
+n_quad: 3            # 元コードの 3 点求積に対応 (SPEC §2.3)
+tau: 1.0            # softmax 温度 (NaN 対策, SPEC §6.3)
+clamp_quad_weight: false
+
+use_4bit: true
+
+# 統制変数 (A/B と同一)
+num_train_epochs: 1.0
+learning_rate: 1.0e-4
+warmup_ratio: 0.03
+lr_scheduler_type: cosine
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+max_grad_norm: 1.0
+gradient_checkpointing: true
+seed: 0
+logging_steps: 5
+save_steps: 200
+fp16: true
+bf16: false
