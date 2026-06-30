@@ -14,6 +14,7 @@ lora_dropout: 0.05
 n_quad: 3            # 元コードの 3 点求積に対応 (SPEC §2.3)
 tau: 1.0            # softmax 温度 (NaN 対策, SPEC §6.3)
 clamp_quad_weight: false
+gate_lr_multiplier: 10.0   # ゲート(shape_fn/quad_weights)を高 LR で学習 (C が D に縮退するのを防ぐ)
 
 use_4bit: true
 

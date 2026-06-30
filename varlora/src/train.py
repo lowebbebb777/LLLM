@@ -85,6 +85,9 @@ class TrainConfig:
     bf16: bool = False
     fp16: bool = True
     optim_8bit: bool = True  # SPEC §6.2: VRAM 節約。bitsandbytes PagedAdamW8bit を優先
+    gate_lr_multiplier: float = 10.0  # ゲート(shape_fn/quad_weights)の LR 倍率。
+    # ゲートは僅少パラメータで 62M の経路パラメータと同 LR だと学習が進まず qw が
+    # 一様初期値(1/n_quad)に張り付く → C が D に縮退して交絡。別 group で高 LR にする。
     target_modules: list = field(default_factory=lambda: list(FFN_TARGET_MODULES))
 
     def __post_init__(self) -> None:
@@ -267,8 +270,33 @@ def make_collate_fn(tokenizer):
     return collate
 
 
+def build_param_groups(model, cfg: TrainConfig):
+    """ゲートパラメータ (shape_fn / quad_weights) を高 LR の別 group に分ける。
+
+    ゲートは数百パラメータしかなく、62M の経路パラメータ (cont/disc) と同 LR では
+    学習が進まず qw が一様初期値に張り付く。別 group に gate_lr_multiplier 倍の LR を
+    与えて、ゲートの動的性が出るか否かを公平に検証できるようにする。
+    返り値: (param_groups, n_gate_param_tensors)
+    """
+    gate, base = [], []
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if "shape_fn" in n or n.endswith("quad_weights"):
+            gate.append(p)
+        else:
+            base.append(p)
+    groups = [{"params": base, "lr": cfg.learning_rate}]
+    if gate:
+        groups.append({"params": gate, "lr": cfg.learning_rate * cfg.gate_lr_multiplier})
+    return groups, len(gate)
+
+
 def build_optimizer(params, cfg: TrainConfig):
-    """VRAM 節約のため 8bit paged optimizer を優先 (SPEC §6.2)。無ければ AdamW。"""
+    """VRAM 節約のため 8bit paged optimizer を優先 (SPEC §6.2)。無ければ AdamW。
+
+    params は素のパラメータ列でも param_groups (dict のリスト) でも可。
+    """
     import torch
 
     if cfg.optim_8bit:
@@ -330,7 +358,8 @@ def train_loop(model, tokenizer, train_ds, cfg: TrainConfig) -> None:
     )
 
     trainable = [p for p in model.parameters() if p.requires_grad]
-    optimizer = build_optimizer(trainable, cfg)
+    param_groups, n_gate = build_param_groups(model, cfg)
+    optimizer = build_optimizer(param_groups, cfg)
 
     accum = cfg.gradient_accumulation_steps
     updates_per_epoch = math.ceil(len(loader) / accum)
@@ -348,7 +377,8 @@ def train_loop(model, tokenizer, train_ds, cfg: TrainConfig) -> None:
     global_step, running, last_gnorm, micro_since_log = 0, 0.0, 0.0, 0
     n_epochs = math.ceil(cfg.num_train_epochs)
     print(f"[train] total_updates={total_updates} warmup={warmup} "
-          f"updates/epoch={updates_per_epoch} optimizer={type(optimizer).__name__}")
+          f"updates/epoch={updates_per_epoch} optimizer={type(optimizer).__name__} "
+          f"gate_params={n_gate} gate_lr={cfg.learning_rate * cfg.gate_lr_multiplier:.1e}")
 
     for epoch in range(n_epochs):
         for i, batch in enumerate(loader):

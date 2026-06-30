@@ -15,7 +15,13 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from inject import inject_variational_lora, freeze_base_train_adapters  # noqa: E402
-from train import TrainConfig, build_optimizer, gate_statistics, save_adapter  # noqa: E402
+from train import (  # noqa: E402
+    TrainConfig,
+    build_optimizer,
+    build_param_groups,
+    gate_statistics,
+    save_adapter,
+)
 from variational_lora import VariationalLoRA  # noqa: E402
 
 
@@ -73,6 +79,32 @@ def test_gate_statistics_fixed_is_na():
     m = _injected("fixed")
     s = gate_statistics(m)
     assert s == "qw=n/a", s  # fixed は dynamic ゲートを持たない
+
+
+def test_build_param_groups_separates_gate():
+    m = _injected("dynamic")
+    cfg = TrainConfig(condition="C", learning_rate=1e-4, gate_lr_multiplier=10.0)
+    groups, n_gate = build_param_groups(m, cfg)
+    # 2 group: base(cont/disc) と gate(shape_fn/quad_weights)
+    assert len(groups) == 2, groups
+    base_g, gate_g = groups[0], groups[1]
+    assert abs(base_g["lr"] - 1e-4) < 1e-12
+    assert abs(gate_g["lr"] - 1e-3) < 1e-12  # 10x
+    # gate group の要素数 = (shape_fn.weight + shape_fn.bias + quad_weights) * 注入数
+    # ToyModel(2層) * 3 FFN = 6 modules → 6 * 3 = 18
+    assert n_gate == 18, n_gate
+    # gate と base は重複しない
+    gate_ids = {id(p) for p in gate_g["params"]}
+    base_ids = {id(p) for p in base_g["params"]}
+    assert gate_ids.isdisjoint(base_ids)
+
+
+def test_fixed_gate_has_no_gate_group():
+    m = _injected("fixed")  # 条件 D 相当: ゲートパラメータ無し
+    cfg = TrainConfig(condition="D")
+    groups, n_gate = build_param_groups(m, cfg)
+    assert n_gate == 0
+    assert len(groups) == 1  # base group のみ
 
 
 def test_build_optimizer_falls_back_to_adamw():
