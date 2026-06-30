@@ -115,6 +115,9 @@ class VariationalLoRA(nn.Module):
         # (α/r) スケール (標準 LoRA と同じ)
         self.scaling = config.alpha / config.r
 
+        # M0 観察用: 直近 forward の求積重み qw 平均 (ゲートの 0/1 張り付き検出)
+        self._last_qw_mean = None
+
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -163,6 +166,9 @@ class VariationalLoRA(nn.Module):
 
         # 求積重み (形状関数ゲート + ガウス求積)
         qw = self.gate(x)  # [*, 1]
+        if self.cfg.gate_mode == "dynamic":
+            # 観察用に直近 qw 平均を記録 (M0: ゲートが 0/1 に張り付いてないか)
+            self._last_qw_mean = qw.detach().mean()
 
         # 変分原理的結合: 内部仕事 (連続) + 境界仕事 (離散)
         out = qw * cont + (1.0 - qw) * disc

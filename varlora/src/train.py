@@ -84,6 +84,7 @@ class TrainConfig:
     save_steps: int = 200
     bf16: bool = False
     fp16: bool = True
+    optim_8bit: bool = True  # SPEC §6.2: VRAM 節約。bitsandbytes PagedAdamW8bit を優先
     target_modules: list = field(default_factory=lambda: list(FFN_TARGET_MODULES))
 
     def __post_init__(self) -> None:
@@ -226,70 +227,171 @@ def build_dataset(cfg: TrainConfig, tokenizer):
         ds = load_dataset(cfg.dataset, split="train")
 
     def tokenize(batch):
-        out = tokenizer(
+        # labels はパディングのみ -100 でマスクする collate 側で作る (正規の eos を
+        # マスクしないため)。ここでは input_ids / attention_mask のみ返す。
+        return tokenizer(
             batch[cfg.text_field],
             truncation=True,
             max_length=cfg.max_seq_length,
             padding=False,
         )
-        out["labels"] = [ids.copy() for ids in out["input_ids"]]
-        return out
 
     return ds.map(tokenize, batched=True, remove_columns=ds.column_names)
 
 
 # ---------------------------------------------------------------------------
-# NaN 検知コールバック (SPEC §6.3)
+# カスタム学習ループ (SPEC §6)
 # ---------------------------------------------------------------------------
-def make_nan_detection_callback(dump_dir: str):
-    from transformers import TrainerCallback
-
-    class NaNDetectionCallback(TrainerCallback):
-        """loss が NaN/Inf になった step の state を JSON にダンプして停止する。"""
-
-        def on_log(self, args, state, control, logs=None, **kwargs):
-            if not logs:
-                return
-            loss = logs.get("loss")
-            if loss is not None and (loss != loss or loss in (float("inf"), float("-inf"))):
-                os.makedirs(dump_dir, exist_ok=True)
-                path = os.path.join(dump_dir, f"nan_step_{state.global_step}.json")
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(
-                        {"global_step": state.global_step, "logs": logs, "log_history": state.log_history},
-                        f,
-                        indent=2,
-                    )
-                print(f"[NaN] loss={loss} at step {state.global_step}. dumped → {path}")
-                control.should_training_stop = True
-
-    return NaNDetectionCallback()
+# transformers.Trainer は 4bit 量子化モデルの学習を「PEFT 経由でアダプタが付いて
+# いる」場合のみ許可する (validate_quantization_for_training)。条件 C/D は PEFT を
+# 介さず VariationalLoRA を直接注入するためその検査に弾かれる。よって Trainer を
+# 使わず自前ループを回す。これにより SPEC §6.3 の NaN ダンプ・勾配 clip と、
+# M0 チェックリストの「ゲート値が 0/1 に張り付いてないか」観察を直接実装できる。
 
 
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
-def build_training_arguments(cfg: TrainConfig):
-    from transformers import TrainingArguments
+def make_collate_fn(tokenizer):
+    """input_ids/attention_mask を動的パディングし、パディング位置のみ labels=-100。
 
-    return TrainingArguments(
-        output_dir=cfg.output_dir,
-        num_train_epochs=cfg.num_train_epochs,
-        per_device_train_batch_size=cfg.per_device_train_batch_size,
-        gradient_accumulation_steps=cfg.gradient_accumulation_steps,
-        learning_rate=cfg.learning_rate,
-        warmup_ratio=cfg.warmup_ratio,
-        lr_scheduler_type=cfg.lr_scheduler_type,
-        max_grad_norm=cfg.max_grad_norm,  # SPEC §6.3
-        gradient_checkpointing=cfg.gradient_checkpointing,
-        logging_steps=cfg.logging_steps,
-        save_steps=cfg.save_steps,
-        seed=cfg.seed,
-        data_seed=cfg.seed,  # SPEC §4.4: 評価seed/seed を固定
-        bf16=cfg.bf16,
-        fp16=cfg.fp16,
-        report_to=[],
+    pad_token==eos_token のとき正規の eos までマスクしてしまう DataCollator の罠を
+    避けるため、attention_mask==0 の位置だけを -100 にする。
+    """
+    import torch
+
+    def collate(features):
+        batch = tokenizer.pad(features, return_tensors="pt", pad_to_multiple_of=8)
+        labels = batch["input_ids"].clone()
+        labels[batch["attention_mask"] == 0] = -100
+        batch["labels"] = labels
+        return batch
+
+    return collate
+
+
+def build_optimizer(params, cfg: TrainConfig):
+    """VRAM 節約のため 8bit paged optimizer を優先 (SPEC §6.2)。無ければ AdamW。"""
+    import torch
+
+    if cfg.optim_8bit:
+        try:
+            import bitsandbytes as bnb
+
+            return bnb.optim.PagedAdamW8bit(params, lr=cfg.learning_rate)
+        except Exception as e:  # CUDA 不整合等
+            print(f"[optim] 8bit optimizer 使用不可 ({e}); AdamW にフォールバック")
+    return torch.optim.AdamW(params, lr=cfg.learning_rate)
+
+
+def gate_statistics(model) -> str:
+    """動的ゲートの観察 (M0 チェックリスト: 0/1 張り付き検出)。
+
+    最初の dynamic な VariationalLoRA から直近 forward の qw 平均と、学習で
+    quad_weights が一様 (1/n_quad) からどれだけ動いたかを返す。
+    """
+    from variational_lora import VariationalLoRA
+
+    for m in model.modules():
+        if isinstance(m, VariationalLoRA) and m.cfg.gate_mode == "dynamic":
+            qw = getattr(m, "_last_qw_mean", None)
+            qw_v = float(qw) if qw is not None else float("nan")
+            qwt = m.quad_weights.detach()
+            return (
+                f"qw_mean={qw_v:.3f} "
+                f"quad_w=[{qwt.min().item():.3f},{qwt.max().item():.3f}]"
+            )
+    return "qw=n/a"
+
+
+def save_adapter(model, cfg: TrainConfig) -> str:
+    import torch
+
+    out = os.path.join(cfg.output_dir, "adapter")
+    os.makedirs(out, exist_ok=True)
+    if cfg.condition in ("A", "B"):
+        model.save_pretrained(out)  # PEFT がアダプタのみ保存
+    else:
+        sd = {n: p.detach().cpu() for n, p in model.named_parameters() if p.requires_grad}
+        torch.save(sd, os.path.join(out, "variational_lora.pt"))
+    return out
+
+
+def train_loop(model, tokenizer, train_ds, cfg: TrainConfig) -> None:
+    import math
+
+    import torch
+    from torch.utils.data import DataLoader
+    from transformers import get_scheduler
+
+    device = next(p.device for p in model.parameters())
+    loader = DataLoader(
+        train_ds,
+        batch_size=cfg.per_device_train_batch_size,
+        shuffle=True,
+        collate_fn=make_collate_fn(tokenizer),
     )
+
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    optimizer = build_optimizer(trainable, cfg)
+
+    accum = cfg.gradient_accumulation_steps
+    updates_per_epoch = math.ceil(len(loader) / accum)
+    total_updates = max(1, int(updates_per_epoch * cfg.num_train_epochs))
+    warmup = int(total_updates * cfg.warmup_ratio)
+    scheduler = get_scheduler(
+        cfg.lr_scheduler_type, optimizer,
+        num_warmup_steps=warmup, num_training_steps=total_updates,
+    )
+
+    dump_dir = os.path.join(cfg.output_dir, "nan_dumps")
+    model.train()
+    optimizer.zero_grad(set_to_none=True)
+
+    global_step, running, last_gnorm = 0, 0.0, 0.0
+    n_epochs = math.ceil(cfg.num_train_epochs)
+    print(f"[train] total_updates={total_updates} warmup={warmup} "
+          f"updates/epoch={updates_per_epoch} optimizer={type(optimizer).__name__}")
+
+    for epoch in range(n_epochs):
+        for i, batch in enumerate(loader):
+            batch = {k: v.to(device) for k, v in batch.items()}
+            loss = model(**batch).loss
+
+            # NaN/Inf 検知 → そのstepの input/state をダンプして停止 (SPEC §6.3)
+            if not torch.isfinite(loss):
+                os.makedirs(dump_dir, exist_ok=True)
+                path = os.path.join(dump_dir, f"nan_step_{global_step}.pt")
+                torch.save(
+                    {"global_step": global_step, "loss": float(loss),
+                     "input_ids": batch["input_ids"].detach().cpu(),
+                     "gate": gate_statistics(model)},
+                    path,
+                )
+                print(f"[NaN] non-finite loss at step {global_step}; dumped → {path}")
+                return
+
+            (loss / accum).backward()
+            running += loss.item()
+
+            if (i + 1) % accum == 0 or (i + 1) == len(loader):
+                # gradient clipping 必須 (SPEC §6.3)
+                last_gnorm = float(torch.nn.utils.clip_grad_norm_(trainable, cfg.max_grad_norm))
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+                global_step += 1
+
+                if global_step % cfg.logging_steps == 0:
+                    denom = accum * cfg.logging_steps
+                    print(f"step {global_step}/{total_updates} "
+                          f"loss={running / denom:.4f} grad_norm={last_gnorm:.3f} "
+                          f"lr={scheduler.get_last_lr()[0]:.2e} {gate_statistics(model)}")
+                    running = 0.0
+                if global_step >= total_updates:
+                    break
+        if global_step >= total_updates:
+            break
+
+    out = save_adapter(model, cfg)
+    print(f"[done] saved → {out}")
 
 
 def main() -> None:
@@ -303,7 +405,7 @@ def main() -> None:
     if args.seed is not None:
         cfg.seed = args.seed
 
-    from transformers import Trainer, DataCollatorForLanguageModeling, set_seed
+    from transformers import set_seed
 
     set_seed(cfg.seed)  # SPEC §4.4: seed 固定
 
@@ -319,19 +421,7 @@ def main() -> None:
           f"trainable={count_trainable_parameters(model):,}")
 
     train_ds = build_dataset(cfg, tokenizer)
-    collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
-    training_args = build_training_arguments(cfg)
-
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_ds,
-        data_collator=collator,
-        callbacks=[make_nan_detection_callback(os.path.join(cfg.output_dir, "nan_dumps"))],
-    )
-    trainer.train()
-    trainer.save_model(os.path.join(cfg.output_dir, "adapter"))
-    print(f"[done] saved → {cfg.output_dir}/adapter")
+    train_loop(model, tokenizer, train_ds, cfg)
 
 
 if __name__ == "__main__":
