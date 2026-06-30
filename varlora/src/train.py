@@ -345,7 +345,7 @@ def train_loop(model, tokenizer, train_ds, cfg: TrainConfig) -> None:
     model.train()
     optimizer.zero_grad(set_to_none=True)
 
-    global_step, running, last_gnorm = 0, 0.0, 0.0
+    global_step, running, last_gnorm, micro_since_log = 0, 0.0, 0.0, 0
     n_epochs = math.ceil(cfg.num_train_epochs)
     print(f"[train] total_updates={total_updates} warmup={warmup} "
           f"updates/epoch={updates_per_epoch} optimizer={type(optimizer).__name__}")
@@ -370,6 +370,7 @@ def train_loop(model, tokenizer, train_ds, cfg: TrainConfig) -> None:
 
             (loss / accum).backward()
             running += loss.item()
+            micro_since_log += 1
 
             if (i + 1) % accum == 0 or (i + 1) == len(loader):
                 # gradient clipping 必須 (SPEC §6.3)
@@ -379,12 +380,14 @@ def train_loop(model, tokenizer, train_ds, cfg: TrainConfig) -> None:
                 optimizer.zero_grad(set_to_none=True)
                 global_step += 1
 
-                if global_step % cfg.logging_steps == 0:
-                    denom = accum * cfg.logging_steps
+                # 最初・logging_steps毎・最終 を必ずログ (短い run でも loss/ゲートが見える)
+                if (global_step == 1 or global_step % cfg.logging_steps == 0
+                        or global_step >= total_updates):
                     print(f"step {global_step}/{total_updates} "
-                          f"loss={running / denom:.4f} grad_norm={last_gnorm:.3f} "
+                          f"loss={running / max(1, micro_since_log):.4f} "
+                          f"grad_norm={last_gnorm:.3f} "
                           f"lr={scheduler.get_last_lr()[0]:.2e} {gate_statistics(model)}")
-                    running = 0.0
+                    running, micro_since_log = 0.0, 0
                 if global_step >= total_updates:
                     break
         if global_step >= total_updates:
