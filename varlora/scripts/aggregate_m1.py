@@ -63,18 +63,62 @@ def main() -> None:
         row = f"{m:32}" + "".join(f"{fmt(data[c].get(m, [])):>{w}}" for c in conds)
         print(row)
 
-    # SPEC §4.3 の判定ヒント (overall 系指標で C vs B, C vs D を機械的にチェック)
-    print("\n=== SPEC §4.3 判定ヒント (overall 指標) ===")
-    key = "numeric/overall"
-    if all(key in data[c] for c in ("B", "C", "D") if c in data):
-        def mean(c):
-            return statistics.fmean(data[c][key]) if data.get(c, {}).get(key) else float("nan")
-        c, b, dd = mean("C"), mean("B"), mean("D")
-        print(f"{key}:  A={mean('A'):.3f}  B={b:.3f}  C={c:.3f}  D={dd:.3f}")
-        print(f"  C>B: {c > b}  C>D: {c > dd}  → 両方 True なら『変分原理アナロジーに効果あり』の候補")
-        print("  ※ 1 seed では確定不可。3 seed で平均±標準偏差・効果量 (evaluate.cohens_d) を見ること")
-    else:
-        print("numeric/overall が全条件に揃っていません")
+    # SPEC §4.3 判定: 仮説の中核指標について C vs {A,B,D} を平均差 + 効果量で見る
+    print("\n=== SPEC §4.3 判定 (効果量 Cohen's d 込み) ===")
+    d_fn = _load_cohens_d()
+    verdict_keys = [k for k in ("numeric/overall", "path_indep/agreement") if any(k in data[c] for c in conds)]
+    for key in verdict_keys:
+        _report_key(data, key, d_fn)
+
+    print("\n判定ルール (SPEC §4.3):")
+    print("  C>B かつ C>D (かつ効果量が無視できない) → 『変分原理アナロジーに効果あり』")
+    print("  C>A だが C≈B → 効果はパラメータ増加由来 / C≈D → ゲート動的性は不要")
+    print("  差が標準偏差の範囲内・|d|が小さいならノイズ (SPEC §5.3)")
+
+
+def _report_key(data, key, d_fn) -> None:
+    def vals(c):
+        return data.get(c, {}).get(key, [])
+
+    def mean(c):
+        v = vals(c)
+        return statistics.fmean(v) if v else float("nan")
+
+    present = [c for c in ("A", "B", "C", "D") if vals(c)]
+    line = "  ".join(f"{c}={mean(c):.3f}" for c in present)
+    print(f"\n[{key}]  {line}")
+    if not vals("C"):
+        print("  C が無いため判定不可")
+        return
+    for other in ("B", "D", "A"):
+        if not vals(other):
+            continue
+        gt = mean("C") > mean(other)
+        d = d_fn(vals("C"), vals(other)) if len(vals("C")) > 1 and len(vals(other)) > 1 else float("nan")
+        d_str = f"d={d:+.2f}" if d == d else "d=n/a(1seed)"
+        print(f"  C vs {other}: C>{other}={gt}  Δ={mean('C') - mean(other):+.3f}  {d_str}")
+
+
+def _load_cohens_d():
+    """evaluate.cohens_d を借りる (src を path に追加)。無ければ簡易実装。"""
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+    try:
+        from evaluate import cohens_d
+        return cohens_d
+    except Exception:
+        import math
+
+        def cohens_d(a, b):
+            if len(a) < 2 or len(b) < 2:
+                return float("nan")
+            va, vb = statistics.variance(a), statistics.variance(b)
+            pooled = math.sqrt(((len(a) - 1) * va + (len(b) - 1) * vb) / (len(a) + len(b) - 2))
+            return (statistics.fmean(a) - statistics.fmean(b)) / pooled if pooled else float("nan")
+
+        return cohens_d
 
 
 if __name__ == "__main__":
