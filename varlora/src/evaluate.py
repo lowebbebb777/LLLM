@@ -156,6 +156,9 @@ FEWSHOT_NUMERIC = (
     "Q: What is 5 plus 3?\nA: 8\n###\n"
     "Q: What is 6 multiplied by 4?\nA: 24\n###\n"
     "Q: Round 2.718 to 2 decimal places.\nA: 2.72\n###\n"
+    # Cp/Cpk の手本 (出力形式を示す。数値は評価問題と別。全条件共通で公平)
+    "Q: A process has USL=12, LSL=0, sigma=2. Compute Cp.\nA: 1.0\n###\n"
+    "Q: A process has USL=10, LSL=0, mean=6, sigma=1. Compute Cpk.\nA: 1.3333\n###\n"
 )
 FEWSHOT_CODE = (
     "Write a Python function `inc(x)` that returns x plus 1.\n"
@@ -460,9 +463,34 @@ if __name__ == "__main__":
     parser.add_argument("--n-quad", type=int, default=3)
     parser.add_argument("--tau", type=float, default=1.0)
     parser.add_argument("--max-new-tokens", type=int, default=100)
+    parser.add_argument("--dump", type=int, default=0,
+                        help="各カテゴリ先頭N問の生プロンプト/生成/抽出を表示して終了 (デバッグ)")
     args = parser.parse_args()
 
     probs = load_numeric_problems(args.numeric_set)
+
+    if args.adapter is not None and args.dump > 0:
+        # デバッグ: 生成テキストと抽出結果を目視する (cpk=0 等の原因調査)
+        model, tok = load_trained_model(
+            args.model, args.condition, args.adapter,
+            r0=args.r0, n_quad=args.n_quad, tau=args.tau,
+        )
+        gen = make_hf_generator(model, tok, max_new_tokens=args.max_new_tokens)
+        seen: Dict[str, int] = {}
+        for prob in probs:
+            if seen.get(prob.category, 0) >= args.dump:
+                continue
+            seen[prob.category] = seen.get(prob.category, 0) + 1
+            prompt = build_eval_prompt(prob, prob.prompt)
+            raw = gen(prompt, 1)[0]
+            trunc = truncate_at_stops(raw)
+            got = parse_number(trunc) if prob.kind == "numeric" else "(code)"
+            print(f"\n--- [{prob.category}] {prob.id} ({prob.kind}) ---")
+            print(f"Q: {prob.prompt}")
+            print(f"RAW: {raw[:160]!r}")
+            print(f"TRUNC: {trunc[:120]!r}")
+            print(f"PARSED: {got}   EXPECTED: {prob.expected}")
+        raise SystemExit(0)
 
     if args.adapter is None:
         # 自己テスト: データの内訳のみ表示
