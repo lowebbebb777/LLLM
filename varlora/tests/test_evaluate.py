@@ -124,11 +124,26 @@ def test_run_evaluation_composes_metrics():
             return ["def g(x):\n    return x * 2\n"]
         return ["5"]
 
-    scores = run_evaluation(probs, gen)
+    scores = run_evaluation(probs, gen, few_shot=False)  # 素のプロンプトで合成ロジックを検証
     # 数値整合性 (両カテゴリ) と 経路独立性 (numeric のみ) が入る
     assert "numeric/overall" in scores
     assert "path_indep/agreement" in scores
     assert scores["path_indep/agreement"] == 1.0  # 常に 5 を返す → 一致
+
+
+def test_fewshot_prompt_and_extraction():
+    # ベースモデルが few-shot を続けて "答え\n###\nQ: ..." を吐く挙動を模擬し、
+    # build_eval_prompt + truncate_at_stops で綺麗に答えを取り出せることを確認。
+    from evaluate import build_eval_prompt
+    probs = [NumericProblem("s", "What is 8.1 multiplied by 10?", "numeric", "scale",
+                            expected=81.0, rel_tol=0.01)]
+
+    def gen(prompt, n=1):
+        assert prompt.endswith("A:")  # few-shot 形式
+        return [" 81.0\n###\nQ: unrelated next question"]
+
+    sc = numeric_consistency_score(probs, gen, prompt_fn=build_eval_prompt)
+    assert sc["numeric/scale"] == 1.0
 
 
 def test_summarize_and_cohens_d():

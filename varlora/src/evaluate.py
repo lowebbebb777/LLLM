@@ -151,11 +151,42 @@ def parse_number(text: str) -> Optional[float]:
         return None
 
 
+# few-shot 例。ベース (非 Instruct) モデルに「答えの形」を示し、区切り ### で止める。
+FEWSHOT_NUMERIC = (
+    "Q: What is 5 plus 3?\nA: 8\n###\n"
+    "Q: What is 6 multiplied by 4?\nA: 24\n###\n"
+    "Q: Round 2.718 to 2 decimal places.\nA: 2.72\n###\n"
+)
+FEWSHOT_CODE = (
+    "Write a Python function `inc(x)` that returns x plus 1.\n"
+    "def inc(x):\n    return x + 1\n###\n"
+)
+EVAL_STOPS = ("###", "\nQ:")
+
+
+def build_eval_prompt(problem: "NumericProblem", text: str) -> str:
+    """few-shot + 形式合わせのプロンプトを組む (train の Q:/A: 形式に整合)。"""
+    if problem.kind == "numeric":
+        return FEWSHOT_NUMERIC + f"Q: {text}\nA:"
+    return FEWSHOT_CODE + f"{text}\n"
+
+
+def truncate_at_stops(text: str, stops: Sequence[str] = EVAL_STOPS) -> str:
+    """最初の停止文字列で切る (few-shot の続き生成を除去)。"""
+    cut = len(text)
+    for s in stops:
+        idx = text.find(s)
+        if idx != -1:
+            cut = min(cut, idx)
+    return text[:cut]
+
+
 def numeric_consistency_score(
     problems: Sequence[NumericProblem],
     generate: Generator,
     *,
     n_samples: int = 1,
+    prompt_fn=None,
 ) -> Dict[str, float]:
     """数値整合性スコア: pass@1 とは別軸で「数として正しく扱えているか」を測る。
 
@@ -165,7 +196,8 @@ def numeric_consistency_score(
     """
     per_category: Dict[str, List[float]] = {}
     for prob in problems:
-        comp = generate(prob.prompt, n_samples)[0]
+        prompt = prompt_fn(prob, prob.prompt) if prompt_fn else prob.prompt
+        comp = truncate_at_stops(generate(prompt, n_samples)[0])
         if prob.kind == "code":
             program = extract_python_code(comp)
             ok = check_correctness(program, prob.test or "")
@@ -200,6 +232,7 @@ def path_independence_score(
     generate: Generator,
     *,
     answer_extractor: Optional[Callable[[str], Optional[float]]] = None,
+    prompt_fn=None,
 ) -> Dict[str, float]:
     """同じ問題を異なる「経路」(言い換え/順序変更) で解かせ、答えの一致度を測る。
 
@@ -219,7 +252,10 @@ def path_independence_score(
         paths = [prob.prompt, *prob.paraphrases]
         if len(paths) < 2:
             continue
-        answers: List[Optional[float]] = [extract(generate(p, 1)[0]) for p in paths]
+        answers: List[Optional[float]] = [
+            extract(truncate_at_stops(generate(prompt_fn(prob, p) if prompt_fn else p, 1)[0]))
+            for p in paths
+        ]
         valid = [a for a in answers if a is not None]
         if len(valid) < 2:
             agreements.append(0.0)
@@ -357,13 +393,29 @@ def load_trained_model(
     return model, tok
 
 
-def make_hf_generator(model, tokenizer, *, max_new_tokens: int = 200, temperature: float = 0.0):
-    """(prompt, n) -> List[str] の生成器。temperature=0 で greedy (経路独立性は決定的に)。"""
+def make_hf_generator(
+    model, tokenizer, *, max_new_tokens: int = 100, temperature: float = 0.0,
+    stops: Sequence[str] = EVAL_STOPS,
+):
+    """(prompt, n) -> List[str] の生成器。temperature=0 で greedy (経路独立性は決定的に)。
+
+    n==1 のときは停止文字列 (### 等) で早期停止して高速化する。
+    """
     import torch
+    from transformers import StoppingCriteria, StoppingCriteriaList
+
+    class _StopOnText(StoppingCriteria):
+        def __init__(self, prompt_len: int):
+            self.prompt_len = prompt_len
+
+        def __call__(self, input_ids, scores, **kw) -> bool:
+            tail = tokenizer.decode(input_ids[0][self.prompt_len:], skip_special_tokens=True)
+            return any(s in tail for s in stops)
 
     @torch.no_grad()
     def gen(prompt: str, n: int = 1) -> List[str]:
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        prompt_len = inputs["input_ids"].shape[1]
         do_sample = temperature > 0
         kwargs = dict(
             max_new_tokens=max_new_tokens,
@@ -373,19 +425,25 @@ def make_hf_generator(model, tokenizer, *, max_new_tokens: int = 200, temperatur
         )
         if do_sample:
             kwargs.update(temperature=temperature, top_p=0.95)
+        if n == 1:  # 早期停止 (バッチ 1 のときのみ安全)
+            kwargs["stopping_criteria"] = StoppingCriteriaList([_StopOnText(prompt_len)])
         outs = model.generate(**inputs, **kwargs)
-        cut = inputs["input_ids"].shape[1]
-        return [tokenizer.decode(o[cut:], skip_special_tokens=True) for o in outs]
+        return [tokenizer.decode(o[prompt_len:], skip_special_tokens=True) for o in outs]
 
     return gen
 
 
-def run_evaluation(problems, generate, *, n_samples: int = 1) -> Dict[str, float]:
-    """自作数値整合性 + 経路独立性 (numeric のみ) をまとめて算出 (SPEC §5.2, §5.2b)。"""
+def run_evaluation(problems, generate, *, n_samples: int = 1, few_shot: bool = True) -> Dict[str, float]:
+    """自作数値整合性 + 経路独立性 (numeric のみ) をまとめて算出 (SPEC §5.2, §5.2b)。
+
+    few_shot=True: ベース (非 Instruct) モデル用に few-shot + 停止トークンで綺麗な
+    答えを引き出す (床張り付き対策)。全条件で同一プロンプトなので比較は公平。
+    """
+    pf = build_eval_prompt if few_shot else None
     scores: Dict[str, float] = {}
-    scores.update(numeric_consistency_score(problems, generate, n_samples=n_samples))
+    scores.update(numeric_consistency_score(problems, generate, n_samples=n_samples, prompt_fn=pf))
     numeric_only = [p for p in problems if p.kind == "numeric" and p.paraphrases]
-    scores.update(path_independence_score(numeric_only, generate))
+    scores.update(path_independence_score(numeric_only, generate, prompt_fn=pf))
     return scores
 
 
@@ -401,7 +459,7 @@ if __name__ == "__main__":
     parser.add_argument("--r0", type=int, default=16)
     parser.add_argument("--n-quad", type=int, default=3)
     parser.add_argument("--tau", type=float, default=1.0)
-    parser.add_argument("--max-new-tokens", type=int, default=200)
+    parser.add_argument("--max-new-tokens", type=int, default=100)
     args = parser.parse_args()
 
     probs = load_numeric_problems(args.numeric_set)
