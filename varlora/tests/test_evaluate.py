@@ -18,6 +18,7 @@ from evaluate import (  # noqa: E402
     parse_number,
     pass_at_k,
     path_independence_score,
+    run_evaluation,
     summarize_seeds,
     NumericProblem,
 )
@@ -109,6 +110,25 @@ def test_path_independence_score():
     assert s_bad["path_indep/agreement"] < 1.0
     assert s_good["path_indep/dispersion"] == 0.0
     assert s_bad["path_indep/dispersion"] > 0.0
+
+
+def test_run_evaluation_composes_metrics():
+    probs = [
+        NumericProblem("a", "num a", "numeric", "cat", expected=5.0, rel_tol=0.01,
+                       paraphrases=["p1", "p2"]),
+        NumericProblem("b", "code b", "code", "cat2", test="assert g(2) == 4"),
+    ]
+
+    def gen(prompt, n=1):
+        if prompt.startswith("code"):
+            return ["def g(x):\n    return x * 2\n"]
+        return ["5"]
+
+    scores = run_evaluation(probs, gen)
+    # 数値整合性 (両カテゴリ) と 経路独立性 (numeric のみ) が入る
+    assert "numeric/overall" in scores
+    assert "path_indep/agreement" in scores
+    assert scores["path_indep/agreement"] == 1.0  # 常に 5 を返す → 一致
 
 
 def test_summarize_and_cohens_d():

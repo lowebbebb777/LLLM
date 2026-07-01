@@ -3,3 +3,6 @@ __pycache__/
 outputs/
 *.log
 .ipynb_checkpoints/
+# 生成される学習データ (scripts/gen_train_data.py で再現可能・大きい)
+data/m1_train.jsonl
+data/m1_dryrun.jsonl

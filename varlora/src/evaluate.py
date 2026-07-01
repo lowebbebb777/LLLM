@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import statistics
 from dataclasses import dataclass, field
@@ -298,15 +299,132 @@ def load_numeric_problems(path: str) -> List[NumericProblem]:
     return problems
 
 
+# ---------------------------------------------------------------------------
+# M1 評価ドライバ: 学習済みアダプタを読み込み → 生成 → メトリクス
+# (重い依存は関数内で遅延 import。メトリクス本体は上部の純関数で単体テスト済み)
+# ---------------------------------------------------------------------------
+def load_trained_model(
+    model_name: str,
+    condition: str,
+    adapter_dir: str,
+    *,
+    use_4bit: bool = True,
+    r0: int = 16,
+    alpha: int = 32,
+    n_quad: int = 3,
+    tau: float = 1.0,
+    fixed_gate: float = 0.5,
+    target_modules=None,
+):
+    """条件に応じて base + アダプタを復元する。A/B=PEFT, C/D=VariationalLoRA 再注入。"""
+    import os
+    import sys
+
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from inject import FFN_TARGET_MODULES, build_bnb_config, inject_variational_lora
+
+    target_modules = target_modules or FFN_TARGET_MODULES
+    tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+
+    kw = {"trust_remote_code": True}
+    if use_4bit:
+        kw["quantization_config"] = build_bnb_config()
+        kw["device_map"] = "auto"
+    base = AutoModelForCausalLM.from_pretrained(model_name, **kw)
+
+    if condition in ("A", "B"):
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(base, adapter_dir)
+    else:
+        gate_mode = "dynamic" if condition == "C" else "fixed"
+        inject_variational_lora(
+            base, r=r0, alpha=alpha, n_quad=n_quad, gate_mode=gate_mode,
+            fixed_gate=fixed_gate, tau=tau, target_modules=target_modules,
+        )
+        sd = torch.load(os.path.join(adapter_dir, "variational_lora.pt"), map_location="cpu")
+        missing, unexpected = base.load_state_dict(sd, strict=False)
+        if unexpected:
+            print(f"[eval] warning: {len(unexpected)} unexpected keys in adapter state")
+        model = base
+
+    model.eval()
+    return model, tok
+
+
+def make_hf_generator(model, tokenizer, *, max_new_tokens: int = 200, temperature: float = 0.0):
+    """(prompt, n) -> List[str] の生成器。temperature=0 で greedy (経路独立性は決定的に)。"""
+    import torch
+
+    @torch.no_grad()
+    def gen(prompt: str, n: int = 1) -> List[str]:
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        do_sample = temperature > 0
+        kwargs = dict(
+            max_new_tokens=max_new_tokens,
+            num_return_sequences=n,
+            do_sample=do_sample,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+        if do_sample:
+            kwargs.update(temperature=temperature, top_p=0.95)
+        outs = model.generate(**inputs, **kwargs)
+        cut = inputs["input_ids"].shape[1]
+        return [tokenizer.decode(o[cut:], skip_special_tokens=True) for o in outs]
+
+    return gen
+
+
+def run_evaluation(problems, generate, *, n_samples: int = 1) -> Dict[str, float]:
+    """自作数値整合性 + 経路独立性 (numeric のみ) をまとめて算出 (SPEC §5.2, §5.2b)。"""
+    scores: Dict[str, float] = {}
+    scores.update(numeric_consistency_score(problems, generate, n_samples=n_samples))
+    numeric_only = [p for p in problems if p.kind == "numeric" and p.paraphrases]
+    scores.update(path_independence_score(numeric_only, generate))
+    return scores
+
+
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="評価メトリクスの自己テスト")
+    parser = argparse.ArgumentParser(description="評価: メトリクス自己テスト or 学習済みモデル評価")
     parser.add_argument("--numeric-set", default="data/numeric_stats_eval/problems.jsonl")
+    parser.add_argument("--adapter", default=None, help="指定すると学習済みモデルを評価")
+    parser.add_argument("--condition", default="C", choices=["A", "B", "C", "D"])
+    parser.add_argument("--model", default="Qwen/Qwen2.5-Coder-7B")
+    parser.add_argument("--out", default=None, help="評価結果 JSON の出力先")
+    parser.add_argument("--r0", type=int, default=16)
+    parser.add_argument("--n-quad", type=int, default=3)
+    parser.add_argument("--tau", type=float, default=1.0)
+    parser.add_argument("--max-new-tokens", type=int, default=200)
     args = parser.parse_args()
+
     probs = load_numeric_problems(args.numeric_set)
-    print(f"loaded {len(probs)} numeric problems")
-    cats: Dict[str, int] = {}
-    for p in probs:
-        cats[p.category] = cats.get(p.category, 0) + 1
-    print("categories:", json.dumps(cats, indent=2, ensure_ascii=False))
+
+    if args.adapter is None:
+        # 自己テスト: データの内訳のみ表示
+        cats: Dict[str, int] = {}
+        for p in probs:
+            cats[p.category] = cats.get(p.category, 0) + 1
+        print(f"loaded {len(probs)} numeric problems")
+        print("categories:", json.dumps(cats, indent=2, ensure_ascii=False))
+    else:
+        # 学習済みモデル評価
+        model, tok = load_trained_model(
+            args.model, args.condition, args.adapter,
+            r0=args.r0, n_quad=args.n_quad, tau=args.tau,
+        )
+        gen = make_hf_generator(model, tok, max_new_tokens=args.max_new_tokens)
+        scores = run_evaluation(probs, gen)
+        result = {"condition": args.condition, "adapter": args.adapter, "scores": scores}
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        if args.out:
+            os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+            with open(args.out, "w", encoding="utf-8") as f:
+                json.dump(result, f, indent=2, ensure_ascii=False)
+            print(f"[eval] saved → {args.out}")

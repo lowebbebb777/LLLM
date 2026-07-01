@@ -431,12 +431,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="VariationalLoRA 学習 (条件 A/B/C/D)")
     parser.add_argument("--config", required=True, help="configs/cond_*.yaml")
     parser.add_argument("--seed", type=int, default=None, help="config の seed を上書き")
+    parser.add_argument("--dataset", default=None, help="config の dataset を上書き (M0 smoke 等)")
+    parser.add_argument("--epochs", type=float, default=None, help="config の num_train_epochs を上書き")
+    parser.add_argument("--output-dir", default=None, help="config の output_dir を上書き (seed 別保存)")
     parser.add_argument("--report-only", action="store_true", help="パラメータ数レポートのみ")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     if args.seed is not None:
         cfg.seed = args.seed
+    if args.dataset is not None:
+        cfg.dataset = args.dataset
+    if args.epochs is not None:
+        cfg.num_train_epochs = args.epochs
+    if args.output_dir is not None:
+        cfg.output_dir = args.output_dir
 
     from transformers import set_seed
 

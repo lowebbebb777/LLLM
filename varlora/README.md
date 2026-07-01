@@ -23,7 +23,7 @@
 - ✅ **実装済み・CPU で検証済み**: `VariationalLoRA` 本体（§2）、FFN 注入（§3.2）、
   4 条件 A/B/C/D の学習配線（§4）、交絡対照の rank 一致計算（§2.4）、
   評価指標（pass@k / 数値整合性 / 経路独立性 / 効果量, §5）、自作評価セットのシード。
-  → `tests/` の **33 テストが全て pass**（`torch` CPU のみで実行可能）。
+  → `tests/` の **38 テストが全て pass**（`torch` CPU のみで実行可能）。
   - 学習は自前ループ（`train.train_loop`）。`transformers.Trainer` は 4bit モデルを
     「PEFT 経由のアダプタ」がある場合のみ学習許可するため、PEFT を介さず注入する
     条件 C/D が弾かれる。自前ループで回避しつつ §6.3 の NaN ダンプ・勾配 clip と
@@ -72,12 +72,21 @@ python3 tests/test_train_config.py
 # 交絡対照が成立するか（B のパラメータ数が C に一致するか）を確認
 python3 src/train.py --config configs/cond_C.yaml --report-only   # 要 transformers/モデル
 
-# M0（実機 RTX 3060）
+# M0（実機 RTX 3060）: 手応え確認（smoke データで1エポック）
 bash scripts/run_m0.sh
 
-# M0 通過後に M1（4条件×3seed）
+# M1 パイプライン検証: 1 seed × 4条件（train→save→reload→eval→集計が通るか）
+bash scripts/run_m1_1seed.sh
+#   本番並みに重くするなら: N_TRAIN=4000 EPOCHS=3 bash scripts/run_m1_1seed.sh
+
+# M1 本番: 4条件 × 3 seed（run_m1_1seed が通ってから）
 bash scripts/run_ablation.sh
 ```
+
+M1 の学習データは合成（`scripts/gen_train_data.py`, 評価セットとのリークを除去）。
+評価は自作数値整合性 + 経路独立性（§5.2 / §5.2b）を `src/evaluate.py` が算出し、
+`scripts/aggregate_m1.py` が A/B/C/D を並べて §4.3 の判定材料（C>B かつ C>D）を表示する。
+HumanEval/MBPP（§5.1）は自己完結性を優先して既定オフ。追加は別途 human-eval ハーネスで。
 
 > パラメータ一致の確認は `compute_matched_rank`（`src/inject.py`）による。Qwen2.5-Coder-7B
 > 実寸（hidden=3584, intermediate=18944, 28層）で **B/C ≈ 0.995**（残差は整数 rank 丸めのみ）、
@@ -102,7 +111,7 @@ varlora/
 │   └── numeric_stats_eval/    # 自作評価セット（§5.2, シード約14問）
 ├── configs/cond_{A,B,C,D}.yaml
 ├── scripts/{run_m0.sh, run_ablation.sh}
-└── tests/                     # CPU で実行可能な単体テスト（33件）
+└── tests/                     # CPU で実行可能な単体テスト（38件）
 ```
 
 ## 次の一手（実装エージェントからの引き継ぎ）

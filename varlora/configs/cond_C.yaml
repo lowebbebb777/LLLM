@@ -2,7 +2,7 @@
 condition: C
 
 model_name: Qwen/Qwen2.5-Coder-7B
-dataset: data/m0_smoke.jsonl
+dataset: data/m1_train.jsonl
 text_field: text
 max_seq_length: 1024
 output_dir: outputs/cond_C
@@ -19,7 +19,7 @@ gate_lr_multiplier: 10.0   # ゲート(shape_fn/quad_weights)を高 LR で学習
 use_4bit: true
 
 # 統制変数 (A/B と同一)
-num_train_epochs: 1.0
+num_train_epochs: 3.0
 learning_rate: 1.0e-4
 warmup_ratio: 0.03
 lr_scheduler_type: cosine
