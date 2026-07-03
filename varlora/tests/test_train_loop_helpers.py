@@ -99,6 +99,23 @@ def test_build_param_groups_separates_gate():
     assert gate_ids.isdisjoint(base_ids)
 
 
+def test_build_param_groups_separates_energy_gate_for_E():
+    m = _injected("equilibrium")  # 条件 E
+    cfg = TrainConfig(condition="E", learning_rate=1e-4, gate_lr_multiplier=10.0)
+    groups, n_gate = build_param_groups(m, cfg)
+    assert len(groups) == 2
+    assert abs(groups[1]["lr"] - 1e-3) < 1e-12  # energy 頭は 10x LR
+    # energy_cont(w,b) + energy_disc(w,b) = 4 tensors × 6 modules(2層×3) = 24
+    assert n_gate == 24, n_gate
+
+
+def test_gate_statistics_equilibrium():
+    m = _injected("equilibrium")
+    m(torch.randn(2, 4, 16))
+    s = gate_statistics(m)
+    assert "qw_mean=" in s and "equilibrium" in s, s
+
+
 def test_fixed_gate_has_no_gate_group():
     m = _injected("fixed")  # 条件 D 相当: ゲートパラメータ無し
     cfg = TrainConfig(condition="D")

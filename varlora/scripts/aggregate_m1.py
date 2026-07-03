@@ -63,20 +63,23 @@ def main() -> None:
         row = f"{m:32}" + "".join(f"{fmt(data[c].get(m, [])):>{w}}" for c in conds)
         print(row)
 
-    # SPEC §4.3 判定: 仮説の中核指標について C vs {A,B,D} を平均差 + 効果量で見る
+    # SPEC §4.3 判定: 中核指標について 実験群(C, および E があれば E) を対照と比較
     print("\n=== SPEC §4.3 判定 (効果量 Cohen's d 込み) ===")
     d_fn = _load_cohens_d()
     verdict_keys = [k for k in ("numeric/overall", "path_indep/agreement") if any(k in data[c] for c in conds)]
-    for key in verdict_keys:
-        _report_key(data, key, d_fn)
+    focuses = [f for f in ("C", "E") if f in data]
+    for focus in focuses:
+        others = [o for o in ("B", "D", "C", "A") if o != focus]
+        for key in verdict_keys:
+            _report_key(data, key, d_fn, focus, others)
 
     print("\n判定ルール (SPEC §4.3):")
-    print("  C>B かつ C>D (かつ効果量が無視できない) → 『変分原理アナロジーに効果あり』")
-    print("  C>A だが C≈B → 効果はパラメータ増加由来 / C≈D → ゲート動的性は不要")
-    print("  差が標準偏差の範囲内・|d|が小さいならノイズ (SPEC §5.3)")
+    print("  C(またはE) > B かつ > D (効果量が無視できない) → 『その機構に効果あり』")
+    print("  >A だが ≈B → 効果はパラメータ増加由来 / ≈D → ゲート動的性は不要")
+    print("  E vs C → 拘束(釣り合い)を入れる効果。差が σ 内・|d|小 ならノイズ (SPEC §5.3)")
 
 
-def _report_key(data, key, d_fn) -> None:
+def _report_key(data, key, d_fn, focus, others) -> None:
     def vals(c):
         return data.get(c, {}).get(key, [])
 
@@ -84,19 +87,19 @@ def _report_key(data, key, d_fn) -> None:
         v = vals(c)
         return statistics.fmean(v) if v else float("nan")
 
-    present = [c for c in ("A", "B", "C", "D") if vals(c)]
+    present = [c for c in ("A", "B", "C", "D", "E") if vals(c)]
     line = "  ".join(f"{c}={mean(c):.3f}" for c in present)
-    print(f"\n[{key}]  {line}")
-    if not vals("C"):
-        print("  C が無いため判定不可")
+    print(f"\n[{focus}] [{key}]  {line}")
+    if not vals(focus):
+        print(f"  {focus} が無いため判定不可")
         return
-    for other in ("B", "D", "A"):
+    for other in others:
         if not vals(other):
             continue
-        gt = mean("C") > mean(other)
-        d = d_fn(vals("C"), vals(other)) if len(vals("C")) > 1 and len(vals(other)) > 1 else float("nan")
+        gt = mean(focus) > mean(other)
+        d = d_fn(vals(focus), vals(other)) if len(vals(focus)) > 1 and len(vals(other)) > 1 else float("nan")
         d_str = f"d={d:+.2f}" if d == d else "d=n/a(1seed)"
-        print(f"  C vs {other}: C>{other}={gt}  Δ={mean('C') - mean(other):+.3f}  {d_str}")
+        print(f"  {focus} vs {other}: {focus}>{other}={gt}  Δ={mean(focus) - mean(other):+.3f}  {d_str}")
 
 
 def _load_cohens_d():

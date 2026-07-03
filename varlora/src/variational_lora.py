@@ -44,10 +44,13 @@ class VariationalLoRAConfig:
     """VariationalLoRA 1 層分の構成。
 
     gate_mode:
-        "dynamic" → SPEC 条件 C。shape_fn + quad_weights を学習し、求積重み qw を
-                     入力依存で動的に決める (本仮説)。
-        "fixed"   → SPEC 条件 D。qw を学習させず定数 fixed_gate (default 0.5) に固定。
-                     cont と disc を等 weight で合成し、ゲート動的性の寄与を分離する。
+        "dynamic"     → SPEC 条件 C。shape_fn + quad_weights を学習し、求積重み qw を
+                         入力依存で「自由に」決める (弱形式の構造だけ移植、釣り合いは非拘束)。
+        "fixed"       → SPEC 条件 D。qw を学習させず定数 fixed_gate (default 0.5) に固定。
+        "equilibrium" → 条件 E (EquilibriumLoRA)。弱形式の「等号(釣り合い δF=0)」を
+                         情報/エネルギーの釣り合いとして課す。qw を自由学習せず、各経路の
+                         エネルギー差の平衡解 qw = σ((E_disc - E_cont)/τ) に「解いて」決める。
+                         E_cont/E_disc は各経路の低ランク code から読む (2r+2 params/module)。
     """
 
     in_features: int
@@ -55,15 +58,17 @@ class VariationalLoRAConfig:
     r: int = 16
     alpha: int = 32
     n_quad: int = DEFAULT_N_QUAD
-    gate_mode: str = "dynamic"  # "dynamic" (条件C) | "fixed" (条件D)
+    gate_mode: str = "dynamic"  # "dynamic"(C) | "fixed"(D) | "equilibrium"(E)
     fixed_gate: float = 0.5  # gate_mode="fixed" のときの定数 qw
-    tau: float = 1.0  # softmax 温度 τ (SPEC §2.3 / §6.3, NaN 対策)
+    tau: float = 1.0  # softmax/sigmoid 温度 τ (SPEC §2.3 / §6.3, NaN 対策)
     clamp_quad_weight: bool = False  # qw を [0,1] にクランプ (partition-of-unity 保険)
     dropout: float = 0.0
 
     def __post_init__(self) -> None:
-        if self.gate_mode not in ("dynamic", "fixed"):
-            raise ValueError(f"gate_mode must be 'dynamic' or 'fixed', got {self.gate_mode!r}")
+        if self.gate_mode not in ("dynamic", "fixed", "equilibrium"):
+            raise ValueError(
+                f"gate_mode must be 'dynamic'|'fixed'|'equilibrium', got {self.gate_mode!r}"
+            )
         if self.r <= 0:
             raise ValueError(f"r must be positive, got {self.r}")
         if self.n_quad <= 0:
@@ -97,20 +102,24 @@ class VariationalLoRA(nn.Module):
 
         self.dropout = nn.Dropout(config.dropout) if config.dropout > 0 else nn.Identity()
 
-        # --- 形状関数ゲート + 求積重み (gate_mode="dynamic" のみ) -----------
+        # --- ゲート機構 (gate_mode ごとに異なる) ---------------------------
+        self.shape_fn = None
+        self.register_parameter("quad_weights", None)
+        self.energy_cont = None
+        self.energy_disc = None
         if config.gate_mode == "dynamic":
-            # 形状関数 N_I(ξ): 入力 x を n_quad 個の求積点 logit へ写す。
-            # softmax により ΣN_I = 1 (分割の単位性) を保証する。
+            # 条件 C: 形状関数 N_I(ξ) を softmax して ΣN_I=1 (分割の単位性) を保証。
             self.shape_fn = nn.Linear(d_in, q, bias=True)
-            # ガウス求積重み w_g。初期値 1/n_quad で一様 (SPEC §2.3)。学習可能 ——
-            # 一様固定だと qw = Σ N_q·(1/q) = (1/q)·ΣN_q = 1/q となり入力非依存に
-            # なってしまう (softmax の ΣN=1 のため)。動的ゲートが「動的」であるためには
-            # quad_weights が非一様化する必要があるので requires_grad=True とする。
+            # ガウス求積重み w_g。初期値 1/n_quad で一様。学習可能 —— 一様固定だと
+            # qw = Σ N_q·(1/q) = 1/q で入力非依存になるため非一様化させる必要がある。
             self.quad_weights = nn.Parameter(torch.full((q,), 1.0 / q))
-        else:
-            # 条件 D: ゲート機構を持たない。qw は定数 fixed_gate。
-            self.shape_fn = None
-            self.register_parameter("quad_weights", None)
+        elif config.gate_mode == "equilibrium":
+            # 条件 E: 弱形式の「等号(釣り合い)」を課す。各経路のエネルギー E を低ランク
+            # code (cont_A(x), disc_A(x)) から読み、qw を自由学習せず平衡解に「解く」:
+            #   F(qw) = qw·E_cont + (1-qw)·E_disc - τ·H(qw)  の δF=0 → qw = σ((E_disc-E_cont)/τ)
+            self.energy_cont = nn.Linear(r, 1, bias=True)
+            self.energy_disc = nn.Linear(r, 1, bias=True)
+        # gate_mode == "fixed" (条件 D): ゲート機構なし。qw は定数 fixed_gate。
 
         # (α/r) スケール (標準 LoRA と同じ)
         self.scaling = config.alpha / config.r
@@ -133,41 +142,60 @@ class VariationalLoRA(nn.Module):
         if self.quad_weights is not None:
             with torch.no_grad():
                 self.quad_weights.fill_(1.0 / self.cfg.n_quad)
+        # エネルギー頭をゼロ初期化 → 初期は E_cont=E_disc=0 → qw=σ(0)=0.5 (等分から開始)。
+        if self.energy_cont is not None:
+            nn.init.zeros_(self.energy_cont.weight)
+            nn.init.zeros_(self.energy_cont.bias)
+            nn.init.zeros_(self.energy_disc.weight)
+            nn.init.zeros_(self.energy_disc.bias)
 
     # ------------------------------------------------------------------ gate
-    def gate(self, x: torch.Tensor) -> torch.Tensor:
+    def gate(
+        self,
+        x: torch.Tensor,
+        cont_code: torch.Tensor = None,
+        disc_code: torch.Tensor = None,
+    ) -> torch.Tensor:
         """求積重み qw を返す。形状 [*, 1] (cont/disc をブレンドするスカラー場)。
 
-        dynamic: qw = Σ_g N_g(x)·w_g   (N=softmax(shape_fn(x)/τ), ΣN=1)
-        fixed  : qw = fixed_gate        (定数, 学習しない)
+        dynamic     : qw = Σ_g N_g(x)·w_g   (N=softmax(shape_fn(x)/τ), ΣN=1)
+        fixed       : qw = fixed_gate        (定数, 学習しない)
+        equilibrium : qw = σ((E_disc-E_cont)/τ)  (自由エネルギー δF=0 の平衡解)
+                      E_cont=energy_cont(cont_code), E_disc=energy_disc(disc_code)
         """
         if self.cfg.gate_mode == "fixed":
             # 条件 D: cont と disc を等 weight (default 0.5) で合成。
             return x.new_full((*x.shape[:-1], 1), self.cfg.fixed_gate)
 
-        # 形状関数ゲート: ΣN_I = 1 を softmax で保証 (SPEC §2.2)。
-        # 温度 τ で logit をスケール (数値安定性 / NaN 対策)。
+        if self.cfg.gate_mode == "equilibrium":
+            # 条件 E: 各経路のエネルギー差の平衡 (Boltzmann/Gibbs)。エネルギーが低い経路に
+            # 重みが寄る: E_cont < E_disc → (E_disc-E_cont)>0 → qw=σ(>0)>0.5 → cont 重視。
+            e_cont = self.energy_cont(cont_code)  # [*, 1]
+            e_disc = self.energy_disc(disc_code)  # [*, 1]
+            return torch.sigmoid((e_disc - e_cont) / self.cfg.tau)  # ∈ (0,1)
+
+        # 条件 C (dynamic): 形状関数ゲート ΣN_I=1 を softmax で保証。温度 τ でスケール。
         logits = self.shape_fn(x) / self.cfg.tau  # [*, n_quad]
         N = F.softmax(logits, dim=-1)  # 分割の単位性 ΣN_I = 1
-        # ガウス求積による統合: qw = Σ_g N_g·w_g → スカラー化。
-        qw = (N * self.quad_weights).sum(dim=-1, keepdim=True)  # [*, 1]
+        qw = (N * self.quad_weights).sum(dim=-1, keepdim=True)  # ガウス求積で統合 [*, 1]
         if self.cfg.clamp_quad_weight:
-            # partition-of-unity (qw∈[0,1]) を強制したいときの保険。default off。
-            qw = qw.clamp(0.0, 1.0)
+            qw = qw.clamp(0.0, 1.0)  # partition-of-unity 保険。default off。
         return qw
 
     # --------------------------------------------------------------- forward
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.dropout(x)
 
-        # 2 系統の低ランクアダプタ
-        cont = self.cont_B(self.cont_A(x))  # 連続場の寄与 (体積積分項)
-        disc = self.disc_B(self.disc_A(x))  # 離散場の寄与 (節点和)
+        # 2 系統の低ランクアダプタ (code を先に計算 —— equilibrium ゲートが使う)
+        cont_code = self.cont_A(x)  # [*, r]
+        disc_code = self.disc_A(x)  # [*, r]
+        cont = self.cont_B(cont_code)  # 連続場の寄与 (体積積分項)
+        disc = self.disc_B(disc_code)  # 離散場の寄与 (節点和)
 
-        # 求積重み (形状関数ゲート + ガウス求積)
-        qw = self.gate(x)  # [*, 1]
-        if self.cfg.gate_mode == "dynamic":
-            # 観察用に直近 qw 平均を記録 (M0: ゲートが 0/1 に張り付いてないか)
+        # 求積重み (ゲート)
+        qw = self.gate(x, cont_code, disc_code)  # [*, 1]
+        if self.cfg.gate_mode in ("dynamic", "equilibrium"):
+            # 観察用に直近 qw 平均を記録 (ゲートが 0/1 に張り付いてないか)
             self._last_qw_mean = qw.detach().mean()
 
         # 変分原理的結合: 内部仕事 (連続) + 境界仕事 (離散)
@@ -193,16 +221,29 @@ class VariationalLoRA(nn.Module):
 
 
 def variational_lora_param_count(
-    in_features: int, out_features: int, r: int, n_quad: int, *, count_bias: bool = True
+    in_features: int,
+    out_features: int,
+    r: int,
+    n_quad: int,
+    *,
+    count_bias: bool = True,
+    gate_mode: str = "dynamic",
 ) -> int:
     """注入 1 module あたりの VariationalLoRA 追加パラメータ数 (解析式, SPEC §2.4)。
 
     交絡対照 (条件 B) の rank 算出 (inject.compute_matched_rank) と整合させるため、
-    モジュールを実体化せずに数えられる解析式として独立に提供する。
+    モジュールを実体化せずに数えられる解析式として独立に提供する。ゲート方式で
+    追加分が変わる: dynamic=shape_fn+quad_weights, equilibrium=energy 頭 2 個, fixed=なし。
     """
     p = 2 * r * (in_features + out_features)  # cont/disc の A,B 2 系統
-    p += in_features * n_quad  # shape_fn weight
-    if count_bias:
-        p += n_quad  # shape_fn bias
-    p += n_quad  # quad_weights
+    if gate_mode == "dynamic":
+        p += in_features * n_quad  # shape_fn weight
+        if count_bias:
+            p += n_quad  # shape_fn bias
+        p += n_quad  # quad_weights
+    elif gate_mode == "equilibrium":
+        p += 2 * r  # energy_cont/energy_disc weight (各 r)
+        if count_bias:
+            p += 2  # energy 頭の bias 2 個
+    # gate_mode == "fixed": ゲート追加パラメータなし
     return p

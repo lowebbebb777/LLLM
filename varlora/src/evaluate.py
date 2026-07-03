@@ -381,7 +381,7 @@ def load_trained_model(
 
         model = PeftModel.from_pretrained(base, adapter_dir)
     else:
-        gate_mode = "dynamic" if condition == "C" else "fixed"
+        gate_mode = {"C": "dynamic", "D": "fixed", "E": "equilibrium"}[condition]
         inject_variational_lora(
             base, r=r0, alpha=alpha, n_quad=n_quad, gate_mode=gate_mode,
             fixed_gate=fixed_gate, tau=tau, target_modules=target_modules,
@@ -456,7 +456,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="評価: メトリクス自己テスト or 学習済みモデル評価")
     parser.add_argument("--numeric-set", default="data/numeric_stats_eval/problems.jsonl")
     parser.add_argument("--adapter", default=None, help="指定すると学習済みモデルを評価")
-    parser.add_argument("--condition", default="C", choices=["A", "B", "C", "D"])
+    parser.add_argument("--condition", default="C", choices=["A", "B", "C", "D", "E"])
     parser.add_argument("--model", default="Qwen/Qwen2.5-Coder-7B")
     parser.add_argument("--out", default=None, help="評価結果 JSON の出力先")
     parser.add_argument("--r0", type=int, default=16)
