@@ -234,6 +234,7 @@ def build_bnb_config():
     """QLoRA 構成の BitsAndBytesConfig (SPEC §3.3)。
 
     load_in_4bit=True, nf4, compute_dtype=float16, double_quant=True (VRAM 節約)。
+    llm_int8_enable_fp32_cpu_offload=True で GPU メモリ不足時に CPU にオフロード。
     """
     from transformers import BitsAndBytesConfig  # 遅延 import (CPU sandbox では不要)
 
@@ -242,6 +243,7 @@ def build_bnb_config():
         bnb_4bit_quant_type="nf4",
         bnb_4bit_compute_dtype=torch.float16,
         bnb_4bit_use_double_quant=True,
+        llm_int8_enable_fp32_cpu_offload=True,
     )
 
 

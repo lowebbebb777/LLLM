@@ -166,6 +166,8 @@ def build_model_and_tokenizer(cfg: TrainConfig):
     model_kwargs: Dict[str, Any] = {"trust_remote_code": True}
     if cfg.use_4bit:
         model_kwargs["quantization_config"] = build_bnb_config()
+        # device_map="auto" with llm_int8_enable_fp32_cpu_offload=True in BitsAndBytesConfig
+        # allows GPU tensors and CPU offload for tensors that don't fit in VRAM
         model_kwargs["device_map"] = "auto"
     model = AutoModelForCausalLM.from_pretrained(cfg.model_name, **model_kwargs)
 
