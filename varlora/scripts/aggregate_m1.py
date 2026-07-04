@@ -51,7 +51,7 @@ def main() -> None:
         parser.error("eval.json を 1 つ以上指定してください")
 
     data = load(paths)
-    conds = [c for c in ["A", "B", "C", "D"] if c in data]
+    conds = [c for c in ["A", "B", "C", "D", "E"] if c in data]
     metrics = sorted({m for c in data for m in data[c]})
 
     # 表示

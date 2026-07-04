@@ -154,8 +154,8 @@ varlora/
 │   └── newmark_lora.py        # M4 stub（M2成功まで保留）
 ├── data/
 │   ├── m0_smoke.jsonl         # M0 手応え用の小データ
-│   └── numeric_stats_eval/    # 自作評価セット（§5.2, シード約14問）
-├── configs/cond_{A,B,C,D}.yaml
+│   └── numeric_stats_eval/    # 自作評価セット（§5.2, 56問＝4カテゴリ×14）
+├── configs/cond_{A,B,C,D,E}.yaml
 ├── scripts/{run_m0.sh, run_ablation.sh}
 └── tests/                     # CPU で実行可能な単体テスト（38件）
 ```
