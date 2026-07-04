@@ -10,8 +10,10 @@ cd "$(dirname "$0")/.."
 echo "=== parameter report (条件 B が C にパラメータ一致するか) ==="
 python3 src/train.py --config configs/cond_C.yaml --report-only
 
-# 条件 C を小データで 1 エポック (M0 本体)
-echo "=== M0 smoke run (condition C, 1 epoch) ==="
-python3 src/train.py --config configs/cond_C.yaml --seed 0
+# 条件 C を小データで 1 エポック (M0 本体)。config は M1 本番データを指すので、
+# M0 では --dataset / --epochs で小さな smoke 設定に上書きする。
+echo "=== M0 smoke run (condition C, smoke data, 1 epoch) ==="
+python3 src/train.py --config configs/cond_C.yaml --seed 0 \
+  --dataset data/m0_smoke.jsonl --epochs 1 --output-dir outputs/m0_cond_C
 
 echo "M0 完了。上記の loss 推移 / NaN ダンプ有無 / VRAM 実挙動を確認すること。"

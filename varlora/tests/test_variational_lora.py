@@ -119,6 +119,58 @@ def test_uniform_quad_weights_make_gate_constant():
     assert torch.allclose(qw, torch.full_like(qw, 1.0 / 3.0), atol=1e-5)
 
 
+def test_equilibrium_forward_shape_and_zero_init():
+    m = _make(gate_mode="equilibrium")
+    x = torch.randn(2, 4, 32)
+    y = m(x)
+    assert y.shape == (2, 4, 48)
+    # cont_B / disc_B が zeros → 出力厳密に 0
+    assert torch.allclose(y, torch.zeros_like(y))
+
+
+def test_equilibrium_gate_starts_at_half():
+    # energy 頭ゼロ初期化 → E_cont=E_disc=0 → qw=σ(0)=0.5
+    m = _make(gate_mode="equilibrium")
+    x = torch.randn(2, 4, 32)
+    qw = m.gate(x, m.cont_A(x), m.disc_A(x))
+    assert qw.shape == (2, 4, 1)
+    assert torch.allclose(qw, torch.full_like(qw, 0.5), atol=1e-6)
+    assert m.shape_fn is None and m.quad_weights is None
+    assert m.energy_cont is not None and m.energy_disc is not None
+
+
+def test_equilibrium_gate_in_unit_interval_and_input_dependent():
+    m = _make(gate_mode="equilibrium")
+    with torch.no_grad():  # エネルギー頭を非ゼロに
+        m.energy_cont.weight.normal_()
+        m.energy_disc.weight.normal_()
+        m.energy_cont.bias.normal_()
+        m.energy_disc.bias.normal_()
+    x1, x2 = torch.randn(1, 1, 32) * 5, torch.randn(1, 1, 32) * 5
+    qw1 = m.gate(x1, m.cont_A(x1), m.disc_A(x1))
+    qw2 = m.gate(x2, m.cont_A(x2), m.disc_A(x2))
+    assert (qw1 > 0).all() and (qw1 < 1).all()  # sigmoid ∈ (0,1)
+    assert not torch.allclose(qw1, qw2)  # 入力依存 (平衡が動く)
+
+
+def test_equilibrium_param_count_matches_formula():
+    d_in, d_out, r, q = 32, 48, 8, 3
+    m = _make(gate_mode="equilibrium", d_in=d_in, d_out=d_out, r=r, n_quad=q)
+    analytic = variational_lora_param_count(d_in, d_out, r, q, gate_mode="equilibrium")
+    assert m.num_adapter_parameters() == analytic, (m.num_adapter_parameters(), analytic)
+
+
+def test_equilibrium_gradients_flow_to_energy_heads():
+    m = _make(gate_mode="equilibrium")
+    with torch.no_grad():
+        m.cont_B.weight.normal_()
+        m.disc_B.weight.normal_()
+    loss = m(torch.randn(2, 3, 32)).pow(2).mean()
+    loss.backward()
+    assert m.energy_cont.weight.grad is not None
+    assert torch.isfinite(loss)
+
+
 def _run_all():
     fns = [v for k, v in globals().items() if k.startswith("test_")]
     for fn in fns:

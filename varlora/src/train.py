@@ -41,7 +41,9 @@ from inject import (
 )
 from variational_lora import variational_lora_param_count
 
-VALID_CONDITIONS = ("A", "B", "C", "D")
+VALID_CONDITIONS = ("A", "B", "C", "D", "E")
+# 条件 → VariationalLoRA gate_mode (A/B は peft 標準 LoRA なので対象外)
+CONDITION_GATE_MODE = {"C": "dynamic", "D": "fixed", "E": "equilibrium"}
 
 
 @dataclass
@@ -199,8 +201,8 @@ def apply_adapter(model, cfg: TrainConfig):
         model = get_peft_model(model, lora_cfg)
         return model, "peft"
 
-    # 条件 C/D: VariationalLoRA を注入
-    gate_mode = "dynamic" if cfg.condition == "C" else "fixed"
+    # 条件 C/D/E: VariationalLoRA を注入
+    gate_mode = CONDITION_GATE_MODE[cfg.condition]
     summary = inject_variational_lora(
         model,
         r=cfg.r0,
@@ -282,8 +284,8 @@ def build_param_groups(model, cfg: TrainConfig):
     for n, p in model.named_parameters():
         if not p.requires_grad:
             continue
-        if "shape_fn" in n or n.endswith("quad_weights"):
-            gate.append(p)
+        if "shape_fn" in n or "energy_" in n or n.endswith("quad_weights"):
+            gate.append(p)  # C: shape_fn/quad_weights, E: energy_cont/energy_disc
         else:
             base.append(p)
     groups = [{"params": base, "lr": cfg.learning_rate}]
@@ -318,14 +320,13 @@ def gate_statistics(model) -> str:
     from variational_lora import VariationalLoRA
 
     for m in model.modules():
-        if isinstance(m, VariationalLoRA) and m.cfg.gate_mode == "dynamic":
+        if isinstance(m, VariationalLoRA) and m.cfg.gate_mode in ("dynamic", "equilibrium"):
             qw = getattr(m, "_last_qw_mean", None)
             qw_v = float(qw) if qw is not None else float("nan")
-            qwt = m.quad_weights.detach()
-            return (
-                f"qw_mean={qw_v:.3f} "
-                f"quad_w=[{qwt.min().item():.3f},{qwt.max().item():.3f}]"
-            )
+            if m.quad_weights is not None:  # dynamic: 求積重みの広がりも観察
+                qwt = m.quad_weights.detach()
+                return f"qw_mean={qw_v:.3f} quad_w=[{qwt.min().item():.3f},{qwt.max().item():.3f}]"
+            return f"qw_mean={qw_v:.3f} (equilibrium)"  # E: qw は平衡解
     return "qw=n/a"
 
 
@@ -431,12 +432,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="VariationalLoRA 学習 (条件 A/B/C/D)")
     parser.add_argument("--config", required=True, help="configs/cond_*.yaml")
     parser.add_argument("--seed", type=int, default=None, help="config の seed を上書き")
+    parser.add_argument("--dataset", default=None, help="config の dataset を上書き (M0 smoke 等)")
+    parser.add_argument("--epochs", type=float, default=None, help="config の num_train_epochs を上書き")
+    parser.add_argument("--output-dir", default=None, help="config の output_dir を上書き (seed 別保存)")
     parser.add_argument("--report-only", action="store_true", help="パラメータ数レポートのみ")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     if args.seed is not None:
         cfg.seed = args.seed
+    if args.dataset is not None:
+        cfg.dataset = args.dataset
+    if args.epochs is not None:
+        cfg.num_train_epochs = args.epochs
+    if args.output_dir is not None:
+        cfg.output_dir = args.output_dir
 
     from transformers import set_seed
 

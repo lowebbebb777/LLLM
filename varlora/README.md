@@ -23,7 +23,7 @@
 - ✅ **実装済み・CPU で検証済み**: `VariationalLoRA` 本体（§2）、FFN 注入（§3.2）、
   4 条件 A/B/C/D の学習配線（§4）、交絡対照の rank 一致計算（§2.4）、
   評価指標（pass@k / 数値整合性 / 経路独立性 / 効果量, §5）、自作評価セットのシード。
-  → `tests/` の **33 テストが全て pass**（`torch` CPU のみで実行可能）。
+  → `tests/` の **38 テストが全て pass**（`torch` CPU のみで実行可能）。
   - 学習は自前ループ（`train.train_loop`）。`transformers.Trainer` は 4bit モデルを
     「PEFT 経由のアダプタ」がある場合のみ学習許可するため、PEFT を介さず注入する
     条件 C/D が弾かれる。自前ループで回避しつつ §6.3 の NaN ダンプ・勾配 clip と
@@ -57,6 +57,52 @@
 3. **M2 結論①** §4.3 の判定（`C>B かつ C>D` で「アナロジーに効果あり」）
 4. M3〜M5 は M2 成功を前提に1機構ずつ（本リポジトリでは未実装）
 
+## M1/M2 結果（実機 RTX 3060, 4000件×3epoch×3seed, 自作評価56問）
+
+**§4.3 厳密ルールでは仮説（自由ゲート版）は支持されず**（C ≈ B）。ただし再現的な
+サブ効果あり。合成データ・3seed の限界つき。
+
+| 指標 | A(標準r16) | B(標準r32) | C(自由ゲート) | D(固定0.5) |
+|------|-----------|-----------|--------------|-----------|
+| numeric/overall | 0.411 | 0.417 | 0.429 | 0.440 |
+| path_indep/agreement | 0.715 | **0.758** | 0.756 | 0.715 |
+| stats_impl | 0.381 | 0.381 | 0.476 | **0.500** |
+
+- **C ≈ B**（overall Δ+0.012, path_indep Δ−0.002）→ 変分構造は容量一致対照を超えない。
+- **C ≫ D**（path_indep d≈1.9）→ 動的ゲートは頑健性に効く（が B に追いつくだけ）。
+- **{C,D} ≫ {A,B}**（stats_impl）→ 2経路構造はコード実装に効く（ゲート非依存）。
+- → 「弱形式の“構造”は入れたが“釣り合い(δF=0)”を課していないと、パラメータ増と区別できない」。
+
+## 条件 E: EquilibriumLoRA（等号＝情報/エネルギーの釣り合いを課す）
+
+上の結果を受け、ゲートを自由学習でなく**平衡解に「解く」**版。弱形式の等号 δF=0 を
+情報/エネルギーの釣り合いとして課す:
+
+```
+qw = σ( (E_disc − E_cont) / τ )      # 自由エネルギー F=qw·E_c+(1-qw)·E_d−τ·H(qw) の停留解
+E_cont = energy_cont(cont_A(x)),  E_disc = energy_disc(disc_A(x))   # 各経路のエネルギーを自分の code から読む
+```
+
+`scripts/run_equilibrium.sh` で条件 E を3seed学習し、既存 A/B/C/D と比較する
+（`E vs B`＝拘束で容量対照を超えるか、`E vs C`＝拘束の効果、`E vs D`＝平衡ゲート vs 固定）。
+E は 60.6M params（C 62.7M より軽い＝B/D は保守的な対照）。
+
+## ロードマップ（M2 以降の検証順序・ユーザー確定）
+
+| 段階 | 検証内容 | 判定 |
+|------|---------|------|
+| **今 (条件E)** | 仮想仕事の「等号」= equilibrium ゲートの効果 | E vs B / E vs C / E vs D |
+| **① (条件F)** | 層共有ゲート: FEM の「1要素=1物理状態」に合わせ、1層に1つの共有 qw に統一 | F vs E / F vs B |
+| **② (保留)** | E も F も B と差がない場合のみ。silu(gate)·up の後（非線形の出口）に介入位置を変更 | その時点で設計 |
+
+①の動機: 現状は 1 層内の gate_proj/up_proj/down_proj 用に **3個の独立な qw** が
+バラバラに内部/境界を判定しており、FEM 的には不整合（1要素の物理状態は1つ）。
+これが信号を薄めている仮説を、共有ゲート化で検証する。
+
+- ①/② とも「一度に1機構ずつ・パラメータ一致対照つき」の流儀 (SPEC §7') を維持する。
+- ② が発動する条件は「E も F も B と区別できない」こと。効果が出た段階で打ち切り、
+  効いた機構を M2 結論として確定する。
+
 ## 使い方
 
 ```bash
@@ -72,12 +118,21 @@ python3 tests/test_train_config.py
 # 交絡対照が成立するか（B のパラメータ数が C に一致するか）を確認
 python3 src/train.py --config configs/cond_C.yaml --report-only   # 要 transformers/モデル
 
-# M0（実機 RTX 3060）
+# M0（実機 RTX 3060）: 手応え確認（smoke データで1エポック）
 bash scripts/run_m0.sh
 
-# M0 通過後に M1（4条件×3seed）
+# M1 パイプライン検証: 1 seed × 4条件（train→save→reload→eval→集計が通るか）
+bash scripts/run_m1_1seed.sh
+#   本番並みに重くするなら: N_TRAIN=4000 EPOCHS=3 bash scripts/run_m1_1seed.sh
+
+# M1 本番: 4条件 × 3 seed（run_m1_1seed が通ってから）
 bash scripts/run_ablation.sh
 ```
+
+M1 の学習データは合成（`scripts/gen_train_data.py`, 評価セットとのリークを除去）。
+評価は自作数値整合性 + 経路独立性（§5.2 / §5.2b）を `src/evaluate.py` が算出し、
+`scripts/aggregate_m1.py` が A/B/C/D を並べて §4.3 の判定材料（C>B かつ C>D）を表示する。
+HumanEval/MBPP（§5.1）は自己完結性を優先して既定オフ。追加は別途 human-eval ハーネスで。
 
 > パラメータ一致の確認は `compute_matched_rank`（`src/inject.py`）による。Qwen2.5-Coder-7B
 > 実寸（hidden=3584, intermediate=18944, 28層）で **B/C ≈ 0.995**（残差は整数 rank 丸めのみ）、
@@ -102,7 +157,7 @@ varlora/
 │   └── numeric_stats_eval/    # 自作評価セット（§5.2, シード約14問）
 ├── configs/cond_{A,B,C,D}.yaml
 ├── scripts/{run_m0.sh, run_ablation.sh}
-└── tests/                     # CPU で実行可能な単体テスト（33件）
+└── tests/                     # CPU で実行可能な単体テスト（38件）
 ```
 
 ## 次の一手（実装エージェントからの引き継ぎ）

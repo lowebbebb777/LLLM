@@ -2,7 +2,7 @@
 condition: A
 
 model_name: Qwen/Qwen2.5-Coder-7B
-dataset: data/m0_smoke.jsonl   # 本番は §5 のデータに差し替え
+dataset: data/m1_train.jsonl   # M1 本番データ (scripts/gen_train_data.py で生成)
 text_field: text
 max_seq_length: 1024
 output_dir: outputs/cond_A
@@ -16,7 +16,7 @@ lora_dropout: 0.05
 use_4bit: true
 
 # 統制変数 (SPEC §4.4: 全条件で固定すること)
-num_train_epochs: 1.0
+num_train_epochs: 3.0
 learning_rate: 1.0e-4
 warmup_ratio: 0.03
 lr_scheduler_type: cosine

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import statistics
 from dataclasses import dataclass, field
@@ -150,11 +151,45 @@ def parse_number(text: str) -> Optional[float]:
         return None
 
 
+# few-shot 例。ベース (非 Instruct) モデルに「答えの形」を示し、区切り ### で止める。
+FEWSHOT_NUMERIC = (
+    "Q: What is 5 plus 3?\nA: 8\n###\n"
+    "Q: What is 6 multiplied by 4?\nA: 24\n###\n"
+    "Q: Round 2.718 to 2 decimal places.\nA: 2.72\n###\n"
+    # Cp/Cpk の手本 (出力形式を示す。数値は評価問題と別。全条件共通で公平)
+    "Q: A process has USL=12, LSL=0, sigma=2. Compute Cp.\nA: 1.0\n###\n"
+    "Q: A process has USL=10, LSL=0, mean=6, sigma=1. Compute Cpk.\nA: 1.3333\n###\n"
+)
+FEWSHOT_CODE = (
+    "Write a Python function `inc(x)` that returns x plus 1.\n"
+    "def inc(x):\n    return x + 1\n###\n"
+)
+EVAL_STOPS = ("###", "\nQ:")
+
+
+def build_eval_prompt(problem: "NumericProblem", text: str) -> str:
+    """few-shot + 形式合わせのプロンプトを組む (train の Q:/A: 形式に整合)。"""
+    if problem.kind == "numeric":
+        return FEWSHOT_NUMERIC + f"Q: {text}\nA:"
+    return FEWSHOT_CODE + f"{text}\n"
+
+
+def truncate_at_stops(text: str, stops: Sequence[str] = EVAL_STOPS) -> str:
+    """最初の停止文字列で切る (few-shot の続き生成を除去)。"""
+    cut = len(text)
+    for s in stops:
+        idx = text.find(s)
+        if idx != -1:
+            cut = min(cut, idx)
+    return text[:cut]
+
+
 def numeric_consistency_score(
     problems: Sequence[NumericProblem],
     generate: Generator,
     *,
     n_samples: int = 1,
+    prompt_fn=None,
 ) -> Dict[str, float]:
     """数値整合性スコア: pass@1 とは別軸で「数として正しく扱えているか」を測る。
 
@@ -164,7 +199,8 @@ def numeric_consistency_score(
     """
     per_category: Dict[str, List[float]] = {}
     for prob in problems:
-        comp = generate(prob.prompt, n_samples)[0]
+        prompt = prompt_fn(prob, prob.prompt) if prompt_fn else prob.prompt
+        comp = truncate_at_stops(generate(prompt, n_samples)[0])
         if prob.kind == "code":
             program = extract_python_code(comp)
             ok = check_correctness(program, prob.test or "")
@@ -199,6 +235,7 @@ def path_independence_score(
     generate: Generator,
     *,
     answer_extractor: Optional[Callable[[str], Optional[float]]] = None,
+    prompt_fn=None,
 ) -> Dict[str, float]:
     """同じ問題を異なる「経路」(言い換え/順序変更) で解かせ、答えの一致度を測る。
 
@@ -218,7 +255,10 @@ def path_independence_score(
         paths = [prob.prompt, *prob.paraphrases]
         if len(paths) < 2:
             continue
-        answers: List[Optional[float]] = [extract(generate(p, 1)[0]) for p in paths]
+        answers: List[Optional[float]] = [
+            extract(truncate_at_stops(generate(prompt_fn(prob, p) if prompt_fn else p, 1)[0]))
+            for p in paths
+        ]
         valid = [a for a in answers if a is not None]
         if len(valid) < 2:
             agreements.append(0.0)
@@ -298,15 +338,179 @@ def load_numeric_problems(path: str) -> List[NumericProblem]:
     return problems
 
 
+# ---------------------------------------------------------------------------
+# M1 評価ドライバ: 学習済みアダプタを読み込み → 生成 → メトリクス
+# (重い依存は関数内で遅延 import。メトリクス本体は上部の純関数で単体テスト済み)
+# ---------------------------------------------------------------------------
+def load_trained_model(
+    model_name: str,
+    condition: str,
+    adapter_dir: str,
+    *,
+    use_4bit: bool = True,
+    r0: int = 16,
+    alpha: int = 32,
+    n_quad: int = 3,
+    tau: float = 1.0,
+    fixed_gate: float = 0.5,
+    target_modules=None,
+):
+    """条件に応じて base + アダプタを復元する。A/B=PEFT, C/D=VariationalLoRA 再注入。"""
+    import os
+    import sys
+
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from inject import FFN_TARGET_MODULES, build_bnb_config, inject_variational_lora
+
+    target_modules = target_modules or FFN_TARGET_MODULES
+    tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+
+    kw = {"trust_remote_code": True}
+    if use_4bit:
+        kw["quantization_config"] = build_bnb_config()
+        kw["device_map"] = "auto"
+    base = AutoModelForCausalLM.from_pretrained(model_name, **kw)
+
+    if condition in ("A", "B"):
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(base, adapter_dir)
+    else:
+        gate_mode = {"C": "dynamic", "D": "fixed", "E": "equilibrium"}[condition]
+        inject_variational_lora(
+            base, r=r0, alpha=alpha, n_quad=n_quad, gate_mode=gate_mode,
+            fixed_gate=fixed_gate, tau=tau, target_modules=target_modules,
+        )
+        sd = torch.load(os.path.join(adapter_dir, "variational_lora.pt"), map_location="cpu")
+        missing, unexpected = base.load_state_dict(sd, strict=False)
+        if unexpected:
+            print(f"[eval] warning: {len(unexpected)} unexpected keys in adapter state")
+        model = base
+
+    model.eval()
+    return model, tok
+
+
+def make_hf_generator(
+    model, tokenizer, *, max_new_tokens: int = 100, temperature: float = 0.0,
+    stops: Sequence[str] = EVAL_STOPS,
+):
+    """(prompt, n) -> List[str] の生成器。temperature=0 で greedy (経路独立性は決定的に)。
+
+    n==1 のときは停止文字列 (### 等) で早期停止して高速化する。
+    """
+    import torch
+    from transformers import StoppingCriteria, StoppingCriteriaList
+
+    class _StopOnText(StoppingCriteria):
+        def __init__(self, prompt_len: int):
+            self.prompt_len = prompt_len
+
+        def __call__(self, input_ids, scores, **kw) -> bool:
+            tail = tokenizer.decode(input_ids[0][self.prompt_len:], skip_special_tokens=True)
+            return any(s in tail for s in stops)
+
+    @torch.no_grad()
+    def gen(prompt: str, n: int = 1) -> List[str]:
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        prompt_len = inputs["input_ids"].shape[1]
+        do_sample = temperature > 0
+        kwargs = dict(
+            max_new_tokens=max_new_tokens,
+            num_return_sequences=n,
+            do_sample=do_sample,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+        if do_sample:
+            kwargs.update(temperature=temperature, top_p=0.95)
+        if n == 1:  # 早期停止 (バッチ 1 のときのみ安全)
+            kwargs["stopping_criteria"] = StoppingCriteriaList([_StopOnText(prompt_len)])
+        outs = model.generate(**inputs, **kwargs)
+        return [tokenizer.decode(o[prompt_len:], skip_special_tokens=True) for o in outs]
+
+    return gen
+
+
+def run_evaluation(problems, generate, *, n_samples: int = 1, few_shot: bool = True) -> Dict[str, float]:
+    """自作数値整合性 + 経路独立性 (numeric のみ) をまとめて算出 (SPEC §5.2, §5.2b)。
+
+    few_shot=True: ベース (非 Instruct) モデル用に few-shot + 停止トークンで綺麗な
+    答えを引き出す (床張り付き対策)。全条件で同一プロンプトなので比較は公平。
+    """
+    pf = build_eval_prompt if few_shot else None
+    scores: Dict[str, float] = {}
+    scores.update(numeric_consistency_score(problems, generate, n_samples=n_samples, prompt_fn=pf))
+    numeric_only = [p for p in problems if p.kind == "numeric" and p.paraphrases]
+    scores.update(path_independence_score(numeric_only, generate, prompt_fn=pf))
+    return scores
+
+
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="評価メトリクスの自己テスト")
+    parser = argparse.ArgumentParser(description="評価: メトリクス自己テスト or 学習済みモデル評価")
     parser.add_argument("--numeric-set", default="data/numeric_stats_eval/problems.jsonl")
+    parser.add_argument("--adapter", default=None, help="指定すると学習済みモデルを評価")
+    parser.add_argument("--condition", default="C", choices=["A", "B", "C", "D", "E"])
+    parser.add_argument("--model", default="Qwen/Qwen2.5-Coder-7B")
+    parser.add_argument("--out", default=None, help="評価結果 JSON の出力先")
+    parser.add_argument("--r0", type=int, default=16)
+    parser.add_argument("--n-quad", type=int, default=3)
+    parser.add_argument("--tau", type=float, default=1.0)
+    parser.add_argument("--max-new-tokens", type=int, default=100)
+    parser.add_argument("--dump", type=int, default=0,
+                        help="各カテゴリ先頭N問の生プロンプト/生成/抽出を表示して終了 (デバッグ)")
     args = parser.parse_args()
+
     probs = load_numeric_problems(args.numeric_set)
-    print(f"loaded {len(probs)} numeric problems")
-    cats: Dict[str, int] = {}
-    for p in probs:
-        cats[p.category] = cats.get(p.category, 0) + 1
-    print("categories:", json.dumps(cats, indent=2, ensure_ascii=False))
+
+    if args.adapter is not None and args.dump > 0:
+        # デバッグ: 生成テキストと抽出結果を目視する (cpk=0 等の原因調査)
+        model, tok = load_trained_model(
+            args.model, args.condition, args.adapter,
+            r0=args.r0, n_quad=args.n_quad, tau=args.tau,
+        )
+        gen = make_hf_generator(model, tok, max_new_tokens=args.max_new_tokens)
+        seen: Dict[str, int] = {}
+        for prob in probs:
+            if seen.get(prob.category, 0) >= args.dump:
+                continue
+            seen[prob.category] = seen.get(prob.category, 0) + 1
+            prompt = build_eval_prompt(prob, prob.prompt)
+            raw = gen(prompt, 1)[0]
+            trunc = truncate_at_stops(raw)
+            got = parse_number(trunc) if prob.kind == "numeric" else "(code)"
+            print(f"\n--- [{prob.category}] {prob.id} ({prob.kind}) ---")
+            print(f"Q: {prob.prompt}")
+            print(f"RAW: {raw[:160]!r}")
+            print(f"TRUNC: {trunc[:120]!r}")
+            print(f"PARSED: {got}   EXPECTED: {prob.expected}")
+        raise SystemExit(0)
+
+    if args.adapter is None:
+        # 自己テスト: データの内訳のみ表示
+        cats: Dict[str, int] = {}
+        for p in probs:
+            cats[p.category] = cats.get(p.category, 0) + 1
+        print(f"loaded {len(probs)} numeric problems")
+        print("categories:", json.dumps(cats, indent=2, ensure_ascii=False))
+    else:
+        # 学習済みモデル評価
+        model, tok = load_trained_model(
+            args.model, args.condition, args.adapter,
+            r0=args.r0, n_quad=args.n_quad, tau=args.tau,
+        )
+        gen = make_hf_generator(model, tok, max_new_tokens=args.max_new_tokens)
+        scores = run_evaluation(probs, gen)
+        result = {"condition": args.condition, "adapter": args.adapter, "scores": scores}
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        if args.out:
+            os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+            with open(args.out, "w", encoding="utf-8") as f:
+                json.dump(result, f, indent=2, ensure_ascii=False)
+            print(f"[eval] saved → {args.out}")
