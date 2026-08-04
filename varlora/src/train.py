@@ -1,10 +1,11 @@
-"""学習ループ — 全条件 (A/B/C/D) を切り替えて QLoRA で学習する (SPEC §4, §6)。
+"""学習ループ — 全条件 (A/B/C/D/E) を切り替えて QLoRA で学習する (SPEC §4, §6)。
 
 条件 (SPEC §4.2):
     A : 標準 LoRA (rank=r0)                         — ベースライン (対照群)
     B : 標準 LoRA (rank 拡大で C とパラメータ数一致)  — 交絡対照
-    C : VariationalLoRA (ゲート動的)                 — 実験群 (本仮説)
-    D : VariationalLoRA (ゲート固定0.5)              — 機構分離
+    C : VariationalLoRA (ゲート動的, 凸結合)         — 実験群 (本仮説)
+    D : VariationalLoRA (ゲート固定0.5, 凸結合)      — 機構分離
+    E : VariationalLoRA (ゲート動的, 残差結合)       — 仮想仕事の釣り合い対照
 
 VRAM / 安定性対策 (SPEC §6):
     - gradient_checkpointing=True 必須
@@ -41,7 +42,7 @@ from inject import (
 )
 from variational_lora import variational_lora_param_count
 
-VALID_CONDITIONS = ("A", "B", "C", "D")
+VALID_CONDITIONS = ("A", "B", "C", "D", "E")
 
 
 @dataclass
@@ -182,7 +183,7 @@ def build_model_and_tokenizer(cfg: TrainConfig):
 def apply_adapter(model, cfg: TrainConfig):
     """条件に応じてアダプタを適用し、(model, kind) を返す。
 
-    kind: "peft" (条件 A/B) | "variational" (条件 C/D)。
+    kind: "peft" (条件 A/B) | "variational" (条件 C/D/E)。
     """
     if cfg.condition in ("A", "B"):
         from peft import get_peft_model
@@ -199,8 +200,8 @@ def apply_adapter(model, cfg: TrainConfig):
         model = get_peft_model(model, lora_cfg)
         return model, "peft"
 
-    # 条件 C/D: VariationalLoRA を注入
-    gate_mode = "dynamic" if cfg.condition == "C" else "fixed"
+    # 条件 C/D/E: VariationalLoRA を注入
+    gate_mode = {"C": "dynamic", "D": "fixed", "E": "residual"}[cfg.condition]
     summary = inject_variational_lora(
         model,
         r=cfg.r0,
@@ -246,7 +247,7 @@ def build_dataset(cfg: TrainConfig, tokenizer):
 # カスタム学習ループ (SPEC §6)
 # ---------------------------------------------------------------------------
 # transformers.Trainer は 4bit 量子化モデルの学習を「PEFT 経由でアダプタが付いて
-# いる」場合のみ許可する (validate_quantization_for_training)。条件 C/D は PEFT を
+# いる」場合のみ許可する (validate_quantization_for_training)。条件 C/D/E は PEFT を
 # 介さず VariationalLoRA を直接注入するためその検査に弾かれる。よって Trainer を
 # 使わず自前ループを回す。これにより SPEC §6.3 の NaN ダンプ・勾配 clip と、
 # M0 チェックリストの「ゲート値が 0/1 に張り付いてないか」観察を直接実装できる。
@@ -318,7 +319,7 @@ def gate_statistics(model) -> str:
     from variational_lora import VariationalLoRA
 
     for m in model.modules():
-        if isinstance(m, VariationalLoRA) and m.cfg.gate_mode == "dynamic":
+        if isinstance(m, VariationalLoRA) and m.cfg.gate_mode in ("dynamic", "residual"):
             qw = getattr(m, "_last_qw_mean", None)
             qw_v = float(qw) if qw is not None else float("nan")
             qwt = m.quad_weights.detach()
@@ -336,7 +337,7 @@ def save_adapter(model, cfg: TrainConfig) -> str:
     os.makedirs(out, exist_ok=True)
     if cfg.condition in ("A", "B"):
         model.save_pretrained(out)  # PEFT がアダプタのみ保存
-    else:
+    else:  # C/D/E
         sd = {n: p.detach().cpu() for n, p in model.named_parameters() if p.requires_grad}
         torch.save(sd, os.path.join(out, "variational_lora.pt"))
     return out

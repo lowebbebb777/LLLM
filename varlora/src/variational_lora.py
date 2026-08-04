@@ -44,10 +44,12 @@ class VariationalLoRAConfig:
     """VariationalLoRA 1 層分の構成。
 
     gate_mode:
-        "dynamic" → SPEC 条件 C。shape_fn + quad_weights を学習し、求積重み qw を
-                     入力依存で動的に決める (本仮説)。
-        "fixed"   → SPEC 条件 D。qw を学習させず定数 fixed_gate (default 0.5) に固定。
-                     cont と disc を等 weight で合成し、ゲート動的性の寄与を分離する。
+        "dynamic"  → SPEC 条件 C。shape_fn + quad_weights を学習し、求積重み qw を
+                      入力依存で動的に決める (本仮説)。結合: qw·cont + (1-qw)·disc
+        "fixed"    → SPEC 条件 D。qw を学習させず定数 fixed_gate (default 0.5) に固定。
+                      cont と disc を等 weight で合成し、ゲート動的性の寄与を分離する。
+        "residual" → SPEC 条件 E。残差/釣り合い形結合: qw·cont - (1-qw)·disc
+                      (δW_int - δW_ext の仮想仕事の釣り合い)。パラメータ数/初期化は C と同一。
     """
 
     in_features: int
@@ -62,8 +64,8 @@ class VariationalLoRAConfig:
     dropout: float = 0.0
 
     def __post_init__(self) -> None:
-        if self.gate_mode not in ("dynamic", "fixed"):
-            raise ValueError(f"gate_mode must be 'dynamic' or 'fixed', got {self.gate_mode!r}")
+        if self.gate_mode not in ("dynamic", "fixed", "residual"):
+            raise ValueError(f"gate_mode must be 'dynamic', 'fixed', or 'residual', got {self.gate_mode!r}")
         if self.r <= 0:
             raise ValueError(f"r must be positive, got {self.r}")
         if self.n_quad <= 0:
@@ -97,8 +99,8 @@ class VariationalLoRA(nn.Module):
 
         self.dropout = nn.Dropout(config.dropout) if config.dropout > 0 else nn.Identity()
 
-        # --- 形状関数ゲート + 求積重み (gate_mode="dynamic" のみ) -----------
-        if config.gate_mode == "dynamic":
+        # --- 形状関数ゲート + 求積重み (gate_mode="dynamic"/"residual") -----------
+        if config.gate_mode in ("dynamic", "residual"):
             # 形状関数 N_I(ξ): 入力 x を n_quad 個の求積点 logit へ写す。
             # softmax により ΣN_I = 1 (分割の単位性) を保証する。
             self.shape_fn = nn.Linear(d_in, q, bias=True)
@@ -138,8 +140,9 @@ class VariationalLoRA(nn.Module):
     def gate(self, x: torch.Tensor) -> torch.Tensor:
         """求積重み qw を返す。形状 [*, 1] (cont/disc をブレンドするスカラー場)。
 
-        dynamic: qw = Σ_g N_g(x)·w_g   (N=softmax(shape_fn(x)/τ), ΣN=1)
-        fixed  : qw = fixed_gate        (定数, 学習しない)
+        dynamic  : qw = Σ_g N_g(x)·w_g        (N=softmax(shape_fn(x)/τ), ΣN=1)
+        fixed    : qw = fixed_gate             (定数, 学習しない)
+        residual : qw = Σ_g N_g(x)·w_g        (dynamic と同じゲート、結合時に符号反転)
         """
         if self.cfg.gate_mode == "fixed":
             # 条件 D: cont と disc を等 weight (default 0.5) で合成。
@@ -166,12 +169,17 @@ class VariationalLoRA(nn.Module):
 
         # 求積重み (形状関数ゲート + ガウス求積)
         qw = self.gate(x)  # [*, 1]
-        if self.cfg.gate_mode == "dynamic":
+        if self.cfg.gate_mode in ("dynamic", "residual"):
             # 観察用に直近 qw 平均を記録 (M0: ゲートが 0/1 に張り付いてないか)
             self._last_qw_mean = qw.detach().mean()
 
-        # 変分原理的結合: 内部仕事 (連続) + 境界仕事 (離散)
-        out = qw * cont + (1.0 - qw) * disc
+        # 結合形 (gate_mode で分岐)
+        if self.cfg.gate_mode == "residual":
+            # 条件 E: 残差/釣り合い形 (δW_int - δW_ext の釣り合い)
+            out = qw * cont - (1.0 - qw) * disc
+        else:
+            # 条件 C/D: 凸結合形 (内部仕事 + 境界仕事)
+            out = qw * cont + (1.0 - qw) * disc
         return self.scaling * out
 
     # ------------------------------------------------------------ utilities
