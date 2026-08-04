@@ -1,0 +1,4 @@
+-r requirements.txt
+transformers>=5.8,<6
+safetensors>=0.5,<1
+pytest>=8,<10

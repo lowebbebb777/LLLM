@@ -2,12 +2,7 @@
 
 **重み付残差法＋動的差分志向**を、FEM・領域分割法・予測子修正子法の観点からLLM推論へ移植できるかを検証する研究プロトタイプです。
 
-現段階ではTransformer高速化を主張しません。まず、次の必要条件を小さなCPU参照実装で検証します。
-
-1. 状態を「確定アンカー＋重み付き局所差分の和」として安定に保持できること
-2. 線形演算では局所差分更新が全量再計算と一致すること
-3. 差分が十分に疎な場合だけ、再アンカーと管理コストを含めても理論的な演算削減余地があること
-4. 誤差が増えたとき、予測子–修正子で全状態へ戻せること
+現段階ではTransformer高速化を主張しません。まず、状態差分に疎性・ブロック局所性・低ランク性が実在するかを測定し、専用GPU実装へ進む価値があるかを棄却可能な形で判定します。
 
 ## 基本状態
 
@@ -21,28 +16,89 @@ residual = H_full - H_tilde
 - `w_j`: 局所寄与の重み
 - `residual`: 差分和と検証済み全状態の不整合
 
-Phase 0では残差を全量計算できる「オラクル」として扱います。後続Phaseで、ランダム射影・監視チャネル・logit marginなどの安価な残差指標へ置き換えます。
+## 現在地
 
-## 現在の実装
+### D0: 線形参照実装 — 合格
 
 - `WeightedResidualLedger`: アンカーと重み付き差分を補償和で管理
 - `IncrementalLinearOperator`: 疎な入力差分に対する厳密な線形層更新
 - `CorrectionPolicy`: 残差閾値または最大増分回数による再アンカー判定
 - `estimate_linear_cost`: 管理費用と定期全量計算を含むFLOP損益モデル
 - `choose_active_indices`: 差分エネルギーに基づくactive自由度選択
-- 合成Phase-0実験とCPU単体テスト
 
-## 実行
+### D1: 実モデルactivation差分観測 — 実装済み、実機測定待ち
 
-```bash
-cd deltafem
-python3 -m pip install -r requirements.txt
+D1はモデルを書き換えません。二つのforward結果を採取し、次を層別にJSON/CSVへ保存します。
 
-PYTHONPATH=src python3 -m unittest discover -s tests -v
-PYTHONPATH=src python3 scripts/run_phase0.py \
-  --output results/local-phase0.json
+- residual stream、attention出力、MLP出力、KV cache
+- 90% / 95% / 99%差分エネルギーを保持する最小active率
+- block active率
+- 閾値後のchanged fraction
+- stable rank、entropy effective rank、SVD energy rank
+- 深層化に伴うchanged fractionとactive率の増減
+- 局所プロンプト編集と逐次token生成の比較
+
+Go条件の初期値は、**10%以下のactive成分またはブロックで90%以上の差分エネルギーを保持する領域が複数層・複数入力で再現すること**です。
+
+D1には外部モデル不要のtoy smokeもあります。toyモデルは配線検査用であり、研究結果には数えません。
+
+## Windows研究環境
+
+今後の標準作業場所:
+
+```text
+C:\Users\soich\PycharmProjects\LLLM
 ```
 
-出力の`theoretical_speedup`はFLOPモデル上の値であり、GPU実測値ではありません。専用疎カーネル、メモリアクセス、起動遅延、CPU–GPU同期を含む実測は後続Phaseで行います。
+リポジトリを最新化した後、PowerShellで実行します。
+
+```powershell
+cd C:\Users\soich\PycharmProjects\LLLM
+powershell -ExecutionPolicy Bypass -File .\deltafem\scripts\setup_windows.ps1
+```
+
+このスクリプトはリポジトリ直下へ`.venv`を作り、既定ではWindows用PyTorch `2.11.0 / CUDA 12.8`、Transformers、テスト依存、DeltaFEMパッケージを導入します。CPU環境なら次を使います。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deltafem\scripts\setup_windows.ps1 -TorchBuild cpu
+```
+
+環境とtoy経路の検証:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deltafem\scripts\verify_windows.ps1
+```
+
+RTX 3060でD1を実行:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deltafem\scripts\run_d1_windows.ps1
+```
+
+既定モデルは`Qwen/Qwen2.5-Coder-0.5B-Instruct`です。初回だけHugging Faceからモデルを`.cache\huggingface`へ取得します。
+
+別モデルの例:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deltafem\scripts\run_d1_windows.ps1 `
+  -Model "Qwen/Qwen2.5-Coder-1.5B-Instruct" `
+  -Device cuda `
+  -View aligned_sequence `
+  -MaxLength 128
+```
+
+結果は`deltafem\results\d1_*\d1_results.json`と`d1_metrics.csv`へ出力されます。生成結果はGit管理対象外です。採否判断に用いた要約だけを後から固定結果としてコミットします。
+
+## 手動実行
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+cd .\deltafem
+python -m pytest -q
+python .\scripts\run_d1.py --mode toy --device cpu
+python .\scripts\run_d1.py --mode hf --device cuda --model Qwen/Qwen2.5-Coder-0.5B-Instruct
+```
+
+`active_fraction`や`d1_go_candidate`は測定上のスクリーニング値です。GPU実時間高速化、精度維持、専用疎カーネルの有効性を証明するものではありません。
 
 研究全体の仮説、棄却条件、マイルストーンは[RESEARCH_PLAN.md](./RESEARCH_PLAN.md)を参照してください。

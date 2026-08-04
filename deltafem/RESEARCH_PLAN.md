@@ -52,12 +52,27 @@ rho + h + 1/M < 1
 - 差分値が小さいだけでは高速化と見なさない。疎性・低ランク性・ブロック局所性を測る
 - 近似結果とexact verificationを分離する
 - 毎回のCPU全量再計算は採用しない。CPUは台帳、assembly、低次元監視を中心とする
-- GPU専用実装へ進む前に、棄却可能なCPU実験で必要条件を確認する
+- GPU専用実装へ進む前に、棄却可能な実験で必要条件を確認する
 - ベースラインは密計算、KV再利用、speculative decoding、層skip等とする
+- toyモデルは計測配線の検証にだけ使い、仮説採否には使わない
 
-## 5. マイルストーン
+## 5. 標準実験環境
 
-### D0: 参照実装と損益式 — 実装済み
+2026-08-05から、主な検証環境をWindowsへ移行する。
+
+```text
+Repository: C:\Users\soich\PycharmProjects\LLLM
+OS: Windows 11
+GPU: NVIDIA GeForce RTX 3060 12GB
+Python environment: C:\Users\soich\PycharmProjects\LLLM\.venv
+Model cache: C:\Users\soich\PycharmProjects\LLLM\.cache\huggingface
+```
+
+環境生成は`deltafem/scripts/setup_windows.ps1`を正本とし、実験結果にはPython、PyTorch、CUDA、GPU名、モデル名、入力条件を記録する。
+
+## 6. マイルストーン
+
+### D0: 参照実装と損益式 — 合格
 
 - アンカー＋重み付き差分台帳
 - 疎な線形増分の厳密一致
@@ -71,24 +86,65 @@ rho + h + 1/M < 1
 - dense changeでは速度利得なしと判定される
 - 低いchanged fractionでは理論的余地が現れる
 
-### D1: 実モデルactivation差分の観測
+### D1: 実モデルactivation差分の観測 — 計測実装完了、Windows実機測定待ち
 
-対象候補: TinyLlama、OPT-125M、Qwen 0.5B級。
+実装済み:
+
+- Hugging Face causal LMのモデル非依存forward recorder
+- residual hidden statesの採取
+- attention / MLP module hookの自動選択
+- legacy cacheとDynamicCacheを想定したKV採取
+- 局所プロンプト編集前後の比較
+- greedy逐次token間の比較
+- last-token比較と整列sequence比較
+- top-k energy、block energy、changed fraction、有効ランク
+- 層別densification指標
+- JSON / UTF-8 BOM付きCSV出力
+- D1 Go候補の自動スクリーニング
+- 外部モデル不要のtoy smokeと単体テスト
+
+初回実モデル:
+
+```text
+Qwen/Qwen2.5-Coder-0.5B-Instruct
+```
+
+比較候補:
+
+- Qwen2.5-Coder-1.5B-Instruct
+- TinyLlama級
+- OPT-125M級
 
 各層で測るもの:
 
 - `Delta h`のtop-k energy比
 - block sparsity
-- 有効ランク
+- stable rank / entropy effective rank / energy rank
 - 層深度に対する差分の密化率
 - attention / MLP / residual / KVの比較
 - 逐次生成と局所プロンプト編集の比較
 
 Go条件の初期案:
 
-- 10%以下のactive成分またはブロックで90%以上の差分エネルギーを保持する領域が複数層で再現する
+- 10%以下のactive成分またはブロックで90%以上の差分エネルギーを保持する領域が複数層・複数入力で再現する
+- zero deltaやtoy smokeだけではGoにしない
+- 少なくとも2種類の入力群または2モデルで再現性を確認してからD2へ進む
+
+D1実験行列:
+
+| 軸 | 初期条件 |
+|---|---|
+| regime | prompt edit / token step |
+| activation view | last token / aligned sequence |
+| model | Qwen 0.5B、次に1.5Bまたは別系列 |
+| max length | 64 / 128 / 256 |
+| block size | 32 / 64 / 128 |
+| threshold | relative `1e-4` / `1e-3` / `1e-2` |
+| data | コード境界条件、null処理、制約追加、日本語編集 |
 
 ### D2: 近似predictorとcorrector
+
+D1 Go条件を満たした領域だけを対象にする。
 
 - top-k、block sparse、低ランクJacobian近似を比較
 - exact residual oracleで誤差伝播を測定
@@ -127,24 +183,6 @@ Go条件:
 - SSM状態の増分更新
 - Runovaの反復状態更新
 
-## 6. Phase 0実験行列
-
-| 変数 | 候補 |
-|---|---|
-| changed fraction | 1%, 5%, 10%, 25%, 50%, 100% |
-| reanchor interval | 4, 8, 16, 32 |
-| management cost | dense計算の0%, 2%, 5%, 10% |
-| delta scale | 1e-4, 1e-3, 1e-2, 1e-1 |
-| dtype | float64参照、後にfloat32/float16 |
-
-記録:
-
-- max absolute / relative error
-- theoretical FLOPs
-- changed fraction
-- reanchor頻度
-- 後続段階ではwall timeと転送量
-
 ## 7. 棄却・停止条件
 
 次のいずれかが継続して成立する場合、汎用Transformer推論高速化としては停止または適用範囲を限定する。
@@ -157,10 +195,12 @@ Go条件:
 
 否定結果も研究成果として保存し、局所編集・SSM・CPU/GPU協調など成功可能性の高い領域へ絞る。
 
-## 8. 直近の実装ステップ
+## 8. 直近の実行ステップ
 
-1. D0参照実装を固定し、Phase-0 JSONを保存
-2. activation recorderのモデル非依存インターフェースを設計
-3. 最小モデルで連続token間と局所編集前後のactivationを収集
-4. layer別のtop-k energy、block sparsity、有効ランクをCSV/JSON化
-5. D1 Go/No-Go判定を行う
+1. Windowsで`setup_windows.ps1`を実行し`.venv`を生成
+2. `verify_windows.ps1`で15テストとtoy smokeを確認
+3. Qwen2.5-Coder-0.5BでD1初回測定
+4. `last_token`と`aligned_sequence`を比較
+5. max lengthとblock sizeを振り、局所性が測定定義に依存しないか確認
+6. 実結果の要約だけを`results/`へ固定コミット
+7. D1 Go/No-Goを判定し、Go領域だけD2へ進める

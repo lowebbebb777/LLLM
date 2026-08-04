@@ -42,8 +42,6 @@ residual = H_full - H_tilde
 
 ### Phase D0: CPU参照実装 — 合格
 
-最初のコミットでは、GPU高速化を主張する前に必要条件を検証する小さな参照実装を追加しました。
-
 - アンカー＋重み付き差分を補償和で管理
 - 疎な入力変化に対する線形層の厳密な増分更新
 - 残差閾値・最大増分回数による予測子–修正子判定
@@ -51,9 +49,31 @@ residual = H_full - H_tilde
 - 差分エネルギーに基づくactive自由度選択
 - 合成Phase-0実験
 
-CPU単体テストは **10件成功**です。
+線形参照では全量計算との相対誤差が概ね`1e-16`で、変更率100%では理論上の利得が消え、変更率が低い場合だけ演算削減余地が現れることを確認しました。これは線形参照とFLOPモデルの検証であり、TransformerまたはGPUの高速化実証ではありません。
 
-合成線形層では全量計算との相対誤差が概ね`1e-16`で、変更率100%では理論上の利得が消え、変更率が低い場合だけ演算削減余地が現れることを確認しました。これは線形参照とFLOPモデルの検証であり、TransformerまたはGPUの高速化実証ではありません。
+### Phase D1: activation差分観測 — 実装済み、Windows実機測定待ち
+
+以下をモデル非依存の計測器として実装しました。
+
+- residual hidden states
+- attention / MLP module output
+- KV cache
+- 局所プロンプト編集前後と逐次token間の比較
+- top-k energy、block energy、changed fraction
+- stable rank、entropy effective rank、SVD energy rank
+- layer depthに対する差分密化
+- JSON / CSV出力とGo候補判定
+- 外部モデル不要のtoy smoke
+
+CPU上の実装検証は **15テスト成功**です。toy smokeでは192件のactivation比較を出力し、toyモデルの差分が密だったため`d1_go_candidate=false`となりました。toy結果は計測配線の検証であり、研究仮説の証拠には使いません。
+
+標準Windows研究場所:
+
+```text
+C:\Users\soich\PycharmProjects\LLLM
+```
+
+初回実モデルは`Qwen/Qwen2.5-Coder-0.5B-Instruct`を予定しています。
 
 ---
 
@@ -81,48 +101,42 @@ CPU単体テストは **10件成功**です。
 
 ---
 
-## 次の正式タスク: D1 activation差分観測
+## 次の正式タスク: D1 Windows実測
 
-D0の次は、新しいニューラル機構を追加することではありません。小型の実モデルからactivation差分を採取し、差分計算に圧縮可能性があるかを測ります。
-
-測定対象:
-
-- layer別の`Delta h` top-k energy
-- block sparsity
-- 有効ランク
-- 深層化に伴う差分の密化率
-- attention / MLP / residual / KVの比較
-- 逐次生成と局所プロンプト編集の比較
+1. Windowsで`.venv`を生成
+2. 15テストとtoy smokeを再現
+3. Qwen2.5-Coder-0.5BでD1を実行
+4. `last_token`と`aligned_sequence`を比較
+5. block sizeとthresholdを振る
+6. 複数層・複数入力でGo条件が再現するか判定
 
 初期Go条件は、**10%以下のactive成分またはブロックで90%以上の差分エネルギーを保持する領域が、複数層・複数入力で再現すること**です。満たさない場合は、汎用Transformer高速化を広く主張せず、局所編集・KV・SSMなどへ適用範囲を絞ります。
 
 ---
 
-## 実行例
+## Windows実行
 
-### DeltaFEM-LLM
-
-```bash
-cd deltafem
-python3 -m pip install -r requirements.txt
-
-PYTHONPATH=src python3 -m unittest discover -s tests -v
-PYTHONPATH=src python3 scripts/run_phase0.py \
-  --output results/local-phase0.json
+```powershell
+cd C:\Users\soich\PycharmProjects\LLLM
+powershell -ExecutionPolicy Bypass -File .\deltafem\scripts\setup_windows.ps1
+powershell -ExecutionPolicy Bypass -File .\deltafem\scripts\verify_windows.ps1
+powershell -ExecutionPolicy Bypass -File .\deltafem\scripts\run_d1_windows.ps1
 ```
+
+既定ではリポジトリ直下の`.venv`へPyTorch `2.11.0 / CUDA 12.8`とTransformersを導入します。CPUのみの場合:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deltafem\scripts\setup_windows.ps1 -TorchBuild cpu
+```
+
+結果は`deltafem\results\d1_*`へ生成されます。
 
 ### VariationalLoRA（保存済み先行研究）
 
-```bash
-cd varlora
-python3 -m pip install -r requirements.txt
-python3 tests/test_variational_lora.py
-python3 tests/test_inject.py
-python3 tests/test_evaluate.py
-python3 tests/test_train_config.py
+```powershell
+cd C:\Users\soich\PycharmProjects\LLLM\varlora
+..\.venv\Scripts\python.exe tests\test_variational_lora.py
 ```
-
-CUDA版PyTorchは環境に合わせて別途導入してください。
 
 ---
 

@@ -1,0 +1,4 @@
+{"id":"python_boundary","label":"prompt_edit","base":"Write a Python function that sums integers from 0 through n-1.","edited":"Write a Python function that sums integers from 0 through n, inclusive."}
+{"id":"python_null_case","label":"prompt_edit","base":"Return the first matching item from a list.","edited":"Return the first matching item from a list, or None when no item matches."}
+{"id":"algorithm_constraint","label":"prompt_edit","base":"Sort the input numbers in ascending order.","edited":"Sort the input numbers in ascending order without modifying the original list."}
+{"id":"japanese_local_edit","label":"prompt_edit","base":"整数の配列から最大値を返すPython関数を書いてください。","edited":"整数の配列から最大値とその添字を返すPython関数を書いてください。"}
