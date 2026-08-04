@@ -1,115 +1,99 @@
 # VariationalLoRA
 
-有限要素法の変分原理（連続場⇄離散点の重み付き統合）を構造的アナロジーとして借用した
-独自 LoRA アダプタ `VariationalLoRA` を Qwen2.5-Coder-7B の **FFN 層** に適用し、
-コード生成 LLM の内部表現を改良できるかを **交絡を排した実験計画**で検証するプロジェクト。
+> **研究状態: 探索的M0検証を完了し、2026-08-05から当面凍結。**  
+> RTX 3060上で学習可能であることは確認済みですが、標準LoRAに対する性能優位と動的ゲートの寄与は未証明です。実装と記録は研究資産として保存し、主研究は[`../deltafem/`](../deltafem/)へ移行します。
 
-詳細な設計・実験計画・検証基準は [`SPEC.md`](./SPEC.md) を参照（これが本プロジェクトの正典）。
+有限要素法の変分原理における「連続場・離散自由度・形状関数・重み付き統合」を構造的アナロジーとして借用し、二つの低ランク経路を入力依存ゲートで統合する独自LoRAアダプタです。
 
-## FEM ⇄ NN 対応（設計意図）
+詳細な設計と元の実験計画は[`SPEC.md`](./SPEC.md)を参照してください。
 
-| FEM 側 | NN 側 (本実装) |
-|--------|----------------|
-| 連続場 σ, ε | `cont` 経路 (`cont_A → cont_B`) |
-| 離散場 節点自由度 u_I | `disc` 経路 (`disc_A → disc_B`) |
-| 形状関数 N_I(ξ), ΣN_I=1 | `shape_fn → softmax`（分割の単位性） |
-| ガウス求積 Σ w_g·f(ξ_g) | `quad_weights` による重み付き統合 |
-| 変分原理 内部+境界仕事 | `out = qw·cont + (1-qw)·disc` |
+## 結論として確定したこと
 
-## 状態（このリポジトリで何が出来ているか）
+RTX 3060 12GB、条件C、約500件、1 epochの単回実機学習でM0を通過しました。
 
-このコードは **GPU の無いサンドボックスで実装・検証**された。したがって：
+| 確認項目 | 結果 |
+|---|---|
+| VRAM内で実行 | OOMなし。4bit、PagedAdamW8bit、gradient checkpointingを使用 |
+| loss低下 | `1.91 -> 約0.5`、63更新 |
+| NaN / Inf | 発生なし |
+| ゲート崩壊 | `qw_mean`が約0.33で、0/1への張り付きなし |
+| ゲート勾配経路 | `gate_lr`倍率に応じた変化を確認 |
 
-- ✅ **実装済み・CPU で検証済み**: `VariationalLoRA` 本体（§2）、FFN 注入（§3.2）、
-  4 条件 A/B/C/D の学習配線（§4）、交絡対照の rank 一致計算（§2.4）、
-  評価指標（pass@k / 数値整合性 / 経路独立性 / 効果量, §5）、自作評価セットのシード。
-  → `tests/` の **33 テストが全て pass**（`torch` CPU のみで実行可能）。
-  - 学習は自前ループ（`train.train_loop`）。`transformers.Trainer` は 4bit モデルを
-    「PEFT 経由のアダプタ」がある場合のみ学習許可するため、PEFT を介さず注入する
-    条件 C/D が弾かれる。自前ループで回避しつつ §6.3 の NaN ダンプ・勾配 clip と
-    M0 のゲート観察（qw が 0/1 に張り付かないか）を直接実装している。
-- ⏳ **ユーザーの RTX 3060 での実機確認が必要**: M0 のチェックリスト
-  （VRAM に収まる / loss が下がる / 勾配が NaN にならない / ゲートが 0/1 に張り付かない）。
-  これは GPU 実機でしか確認できない（SPEC §9-4 の通り、数値は実測で詰める）。
-- ⛔ **意図的に未実装**: M3 (`component_lora.py`) / M4 (`newmark_lora.py`)。
-  SPEC §7-M2/§9 により「M2 で効果が確認できるまで進まない」ため stub のみ
-  （`NotImplementedError` + 設計メモ）。
+したがって、次だけを主張します。
 
-## M0 結果（実機 RTX 3060, 条件C, 500件×1epoch）
+> VariationalLoRAはRTX 3060級の環境で学習可能であり、初期の短時間学習では即座に発散・崩壊しなかった。
 
-`run_m0.sh` 実測。**M0 合格**（SPEC §7-M0 の4項目すべてクリア）。
+## 確定していないこと
 
-| 項目 | 結果 |
-|------|------|
-| VRAM に収まる | ✅ OOM なし（4bit + PagedAdamW8bit + grad-checkpointing） |
-| loss が下がる | ✅ 1.91 → ~0.5（63更新, 1epoch） |
-| 勾配 NaN | ✅ 出ず（max_grad_norm=1.0） |
-| ゲート 0/1 張り付き | ✅ なし。qw_mean≈0.33 で安定 |
+- 標準LoRAより高性能か
+- 同じ学習可能パラメータ数のLoRAより高性能か
+- 入力依存ゲートが固定ゲートより有効か
+- 数値整合性やコード生成能力が安定して改善するか
+- 複数seedで効果が再現するか
 
-**ゲートの学習可能性**: gate_lr を 1× → 10× にすると qw_mean の移動量が −0.001 → −0.009
-とほぼ LR 比例で増加。勾配経路は生きており（死んでいない）、線形応答＝発散兆候なし。
-本番 M1（多ステップ）で動的性が立ち上がるか、`gate_lr_multiplier` で調整して検証する。
+元のM1はA/B/C/Dを複数seedで比較する計画でしたが、2026-08-05時点では未実施です。VariationalLoRAを棄却したわけではなく、限られた研究資源を「重み付残差法＋動的差分推論」の検証へ移すため凍結します。
 
-## マイルストーン（SPEC §7）
+## 構造
 
-1. **M0 手応え確認** ← まずここだけ。`scripts/run_m0.sh`（条件 C を小データ1エポック）
-2. **M1 4条件アブレーション** A/B/C/D ×3seed。`scripts/run_ablation.sh`
-3. **M2 結論①** §4.3 の判定（`C>B かつ C>D` で「アナロジーに効果あり」）
-4. M3〜M5 は M2 成功を前提に1機構ずつ（本リポジトリでは未実装）
+```text
+入力 x
+  |-- cont_A -> cont_B --|
+  |                      |-- 入力依存ゲート -> 出力
+  |-- disc_A -> disc_B --|
+```
 
-## 使い方
+概略:
+
+```python
+cont = cont_B(cont_A(x))
+disc = disc_B(disc_A(x))
+N = softmax(shape_fn(x) / tau)
+qw = sum(N * quad_weights)
+out = qw * cont + (1 - qw) * disc
+```
+
+## 保存されている実装
+
+- VariationalLoRA本体
+- Qwen2.5-Coder-7B FFN層への注入
+- 4bit QLoRA学習
+- A/B/C/D条件切り替え
+- 条件BとCのパラメータ数近似一致
+- 自前学習ループ
+- gradient clipping、NaN/Inf検出、状態ダンプ
+- ゲート統計
+- pass@k、数値整合性、経路独立性、効果量評価
+- CPU単体テスト
+
+`component_lora.py`と`newmark_lora.py`は、追加仮説を未検証のまま積み重ねないためstubとして残しています。
+
+## 実行
 
 ```bash
-# 依存（torch は CUDA 版を別途。SPEC §6.4）
-pip install -r requirements.txt
+cd varlora
+python3 -m pip install -r requirements.txt
 
-# CPU で実装の健全性テスト（GPU 不要）
 python3 tests/test_variational_lora.py
 python3 tests/test_inject.py
 python3 tests/test_evaluate.py
 python3 tests/test_train_config.py
 
-# 交絡対照が成立するか（B のパラメータ数が C に一致するか）を確認
-python3 src/train.py --config configs/cond_C.yaml --report-only   # 要 transformers/モデル
+# 設定とパラメータ数の確認
+python3 src/train.py --config configs/cond_C.yaml --report-only
 
-# M0（実機 RTX 3060）
+# 保存済みM0スクリプト
 bash scripts/run_m0.sh
 
-# M0 通過後に M1（4条件×3seed）
+# 将来研究を再開する場合のA/B/C/D比較
 bash scripts/run_ablation.sh
 ```
 
-> パラメータ一致の確認は `compute_matched_rank`（`src/inject.py`）による。Qwen2.5-Coder-7B
-> 実寸（hidden=3584, intermediate=18944, 28層）で **B/C ≈ 0.995**（残差は整数 rank 丸めのみ）、
-> A は約半分。「効果がパラメータ増加由来か機構由来か」を分離できる設計（SPEC §4.1）。
+## 再開条件
 
-## ディレクトリ（SPEC §8）
+次のいずれかが明確になった場合にM1を再開します。
 
-```
-varlora/
-├── SPEC.md                    # 正典（実装指示書）
-├── README.md
-├── requirements.txt
-├── src/
-│   ├── variational_lora.py    # VariationalLoRA 本体（§2, M0-M1）
-│   ├── inject.py              # FFN 注入 + 条件B rank一致（§3.2, §2.4）
-│   ├── train.py               # 学習ループ（全条件切替, §4, §6）
-│   ├── evaluate.py            # HumanEval/MBPP/自作/経路独立性（§5）
-│   ├── component_lora.py      # M3 stub（M2成功まで保留）
-│   └── newmark_lora.py        # M4 stub（M2成功まで保留）
-├── data/
-│   ├── m0_smoke.jsonl         # M0 手応え用の小データ
-│   └── numeric_stats_eval/    # 自作評価セット（§5.2, シード約14問）
-├── configs/cond_{A,B,C,D}.yaml
-├── scripts/{run_m0.sh, run_ablation.sh}
-└── tests/                     # CPU で実行可能な単体テスト（33件）
-```
+- DeltaFEM-LLMで二経路ゲートを比較対照として必要とする
+- 再現可能な評価セットと複数seed実行時間を確保できる
+- VariationalLoRA固有の仮説を、標準LoRA・固定ゲートと交絡なく判定できる
 
-## 次の一手（実装エージェントからの引き継ぎ）
-
-1. RTX 3060 に依存をインストールし `bash scripts/run_m0.sh` を実行。M0 チェックリストを確認。
-   OOM/NaN が出たら SPEC §6.2/§6.3 の調整順（seq_length↓ → grad_accum↑ → rank↓ / τ 導入 / lr↓）。
-2. M0 で安定設定を確定したら、その設定を 4 つの config に反映し `run_ablation.sh`。
-3. 自作評価セットを 50〜100 問へ拡充（`data/numeric_stats_eval/README.md` 参照）。
-4. §4.3 の判定 → M2。効果が出たら初めて M3/M4 の stub を実装する。
-```
+再開時も成功を前提とせず、`C > B`かつ`C > D`を最低条件として比較します。

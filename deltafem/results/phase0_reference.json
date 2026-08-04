@@ -1,0 +1,78 @@
+{
+  "experiment": "deltafem_phase0_linear_reference",
+  "interpretation": "Algebraic correctness and FLOP screening only; no Transformer or GPU speedup claim.",
+  "seed": 7,
+  "input_features": 256,
+  "output_features": 256,
+  "steps": 32,
+  "reanchor_interval": 16,
+  "management_fraction_of_dense": 0.02,
+  "cases": [
+    {
+      "dense_flops": 131072.0,
+      "incremental_flops": 4157.4400000000005,
+      "amortized_flops": 12349.44,
+      "theoretical_speedup": 10.613598673300165,
+      "changed_fraction": 0.01171875,
+      "requested_changed_fraction": 0.01,
+      "changed_features": 3,
+      "max_abs_error": 9.992007221626409e-16,
+      "max_relative_error": 2.3206541014804674e-16
+    },
+    {
+      "dense_flops": 131072.0,
+      "incremental_flops": 9277.44,
+      "amortized_flops": 17469.440000000002,
+      "theoretical_speedup": 7.502930832356388,
+      "changed_fraction": 0.05078125,
+      "requested_changed_fraction": 0.05,
+      "changed_features": 13,
+      "max_abs_error": 1.5543122344752192e-15,
+      "max_relative_error": 3.253570556732398e-16
+    },
+    {
+      "dense_flops": 131072.0,
+      "incremental_flops": 15933.44,
+      "amortized_flops": 24125.440000000002,
+      "theoretical_speedup": 5.432937181663837,
+      "changed_fraction": 0.1015625,
+      "requested_changed_fraction": 0.1,
+      "changed_features": 26,
+      "max_abs_error": 1.9984014443252818e-15,
+      "max_relative_error": 3.695569143013147e-16
+    },
+    {
+      "dense_flops": 131072.0,
+      "incremental_flops": 35389.44,
+      "amortized_flops": 43581.44,
+      "theoretical_speedup": 3.007518796992481,
+      "changed_fraction": 0.25,
+      "requested_changed_fraction": 0.25,
+      "changed_features": 64,
+      "max_abs_error": 2.220446049250313e-15,
+      "max_relative_error": 4.2741051035673985e-16
+    },
+    {
+      "dense_flops": 131072.0,
+      "incremental_flops": 68157.44,
+      "amortized_flops": 76349.44,
+      "theoretical_speedup": 1.7167381974248928,
+      "changed_fraction": 0.5,
+      "requested_changed_fraction": 0.5,
+      "changed_features": 128,
+      "max_abs_error": 1.9984014443252818e-15,
+      "max_relative_error": 4.278379450087375e-16
+    },
+    {
+      "dense_flops": 131072.0,
+      "incremental_flops": 133693.44,
+      "amortized_flops": 141885.44,
+      "theoretical_speedup": 0.9237875288683602,
+      "changed_fraction": 1.0,
+      "requested_changed_fraction": 1.0,
+      "changed_features": 256,
+      "max_abs_error": 2.3314683517128287e-15,
+      "max_relative_error": 4.225340931938122e-16
+    }
+  ]
+}
