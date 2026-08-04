@@ -5,7 +5,7 @@
     B : 標準 LoRA (rank 拡大で C とパラメータ数一致)  — 交絡対照
     C : VariationalLoRA (ゲート動的, 凸結合)         — 実験群 (本仮説)
     D : VariationalLoRA (ゲート固定0.5, 凸結合)      — 機構分離
-    E : VariationalLoRA (ゲート動的, 残差結合)       — 仮想仕事の釣り合い対照
+    E : VariationalLoRA (ゲート動的, 加法形)         — 結合形の対照 (総仮想仕事形)
 
 VRAM / 安定性対策 (SPEC §6):
     - gradient_checkpointing=True 必須
@@ -201,7 +201,7 @@ def apply_adapter(model, cfg: TrainConfig):
         return model, "peft"
 
     # 条件 C/D/E: VariationalLoRA を注入
-    gate_mode = {"C": "dynamic", "D": "fixed", "E": "residual"}[cfg.condition]
+    gate_mode = {"C": "dynamic", "D": "fixed", "E": "additive"}[cfg.condition]
     summary = inject_variational_lora(
         model,
         r=cfg.r0,
@@ -319,7 +319,7 @@ def gate_statistics(model) -> str:
     from variational_lora import VariationalLoRA
 
     for m in model.modules():
-        if isinstance(m, VariationalLoRA) and m.cfg.gate_mode in ("dynamic", "residual"):
+        if isinstance(m, VariationalLoRA) and m.cfg.gate_mode in ("dynamic", "additive"):
             qw = getattr(m, "_last_qw_mean", None)
             qw_v = float(qw) if qw is not None else float("nan")
             qwt = m.quad_weights.detach()

@@ -1,4 +1,6 @@
-# 条件 E: VariationalLoRA (ゲート動的, 残差結合) — 仮想仕事の釣り合い対照 (SPEC §4.2)
+# 条件 E: VariationalLoRA (ゲート動的, 加法形) — 結合形の対照 / 総仮想仕事形 (SPEC §4.2)
+# 結合: out = qw·cont + disc  (内部仕事のみ求積重み、外部/境界仕事はそのまま加算)
+# ★残差形 qw·cont-(1-qw)·disc は C と退化するため不採用 (variational_lora.py 参照)
 condition: E
 
 model_name: Qwen/Qwen2.5-Coder-7B

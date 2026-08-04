@@ -48,8 +48,19 @@ class VariationalLoRAConfig:
                       入力依存で動的に決める (本仮説)。結合: qw·cont + (1-qw)·disc
         "fixed"    → SPEC 条件 D。qw を学習させず定数 fixed_gate (default 0.5) に固定。
                       cont と disc を等 weight で合成し、ゲート動的性の寄与を分離する。
-        "residual" → SPEC 条件 E。残差/釣り合い形結合: qw·cont - (1-qw)·disc
-                      (δW_int - δW_ext の仮想仕事の釣り合い)。パラメータ数/初期化は C と同一。
+        "additive" → SPEC 条件 E。総仮想仕事形結合: qw·cont + disc
+                      内部仕事(連続場)のみ求積重みで重み付けし、外部/境界仕事(離散場)は
+                      ゲートで割らずそのまま加算する。パラメータ数/初期化は C と同一で、
+                      結合形だけが異なる (交絡対照を保つ)。
+
+    ★不採用: 残差形 qw·cont - (1-qw)·disc について★
+        δW_int - δW_ext の「釣り合い残差」を出力とする案は退化する。
+        disc_B → -disc_B の符号反転で凸結合形 (dynamic) に一致し、かつ disc_B は
+        ゼロ初期化 (符号反転の不動点) なので初期値も勾配軌道も完全一致する。
+        実測でも loss が全 step で厳密に一致し、学習後の関数も同一だった。
+        すなわち別機構ではなく同一モデルの座標変換にすぎないため、アブレーションの
+        アームとして成立しない。加法形は (1-qw) が入力依存の場であり線形写像 disc_B に
+        吸収できないため、非退化 (実測でも loss 軌道が分離)。
     """
 
     in_features: int
@@ -64,8 +75,10 @@ class VariationalLoRAConfig:
     dropout: float = 0.0
 
     def __post_init__(self) -> None:
-        if self.gate_mode not in ("dynamic", "fixed", "residual"):
-            raise ValueError(f"gate_mode must be 'dynamic', 'fixed', or 'residual', got {self.gate_mode!r}")
+        if self.gate_mode not in ("dynamic", "fixed", "additive"):
+            raise ValueError(
+                f"gate_mode must be 'dynamic', 'fixed', or 'additive', got {self.gate_mode!r}"
+            )
         if self.r <= 0:
             raise ValueError(f"r must be positive, got {self.r}")
         if self.n_quad <= 0:
@@ -99,8 +112,8 @@ class VariationalLoRA(nn.Module):
 
         self.dropout = nn.Dropout(config.dropout) if config.dropout > 0 else nn.Identity()
 
-        # --- 形状関数ゲート + 求積重み (gate_mode="dynamic"/"residual") -----------
-        if config.gate_mode in ("dynamic", "residual"):
+        # --- 形状関数ゲート + 求積重み (gate_mode="dynamic"/"additive") -----------
+        if config.gate_mode in ("dynamic", "additive"):
             # 形状関数 N_I(ξ): 入力 x を n_quad 個の求積点 logit へ写す。
             # softmax により ΣN_I = 1 (分割の単位性) を保証する。
             self.shape_fn = nn.Linear(d_in, q, bias=True)
@@ -142,7 +155,7 @@ class VariationalLoRA(nn.Module):
 
         dynamic  : qw = Σ_g N_g(x)·w_g        (N=softmax(shape_fn(x)/τ), ΣN=1)
         fixed    : qw = fixed_gate             (定数, 学習しない)
-        residual : qw = Σ_g N_g(x)·w_g        (dynamic と同じゲート、結合時に符号反転)
+        additive : qw = Σ_g N_g(x)·w_g        (dynamic と同じゲート。結合時の使い方が違う)
         """
         if self.cfg.gate_mode == "fixed":
             # 条件 D: cont と disc を等 weight (default 0.5) で合成。
@@ -169,16 +182,19 @@ class VariationalLoRA(nn.Module):
 
         # 求積重み (形状関数ゲート + ガウス求積)
         qw = self.gate(x)  # [*, 1]
-        if self.cfg.gate_mode in ("dynamic", "residual"):
+        if self.cfg.gate_mode in ("dynamic", "additive"):
             # 観察用に直近 qw 平均を記録 (M0: ゲートが 0/1 に張り付いてないか)
             self._last_qw_mean = qw.detach().mean()
 
         # 結合形 (gate_mode で分岐)
-        if self.cfg.gate_mode == "residual":
-            # 条件 E: 残差/釣り合い形 (δW_int - δW_ext の釣り合い)
-            out = qw * cont - (1.0 - qw) * disc
+        if self.cfg.gate_mode == "additive":
+            # 条件 E: 総仮想仕事形。内部仕事(連続場)のみ求積重みで重み付けし、
+            # 外部/境界仕事(離散場)はゲートで割らずそのまま加算する。
+            # (1-qw) は入力依存の場なので線形写像 disc_B に吸収できず、凸結合形とは
+            # 別の関数クラスになる (退化しない)。
+            out = qw * cont + disc
         else:
-            # 条件 C/D: 凸結合形 (内部仕事 + 境界仕事)
+            # 条件 C/D: 凸結合形 (内部仕事 + 境界仕事を分割の単位性で配分)
             out = qw * cont + (1.0 - qw) * disc
         return self.scaling * out
 

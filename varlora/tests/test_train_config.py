@@ -17,7 +17,7 @@ CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "configs")
 
 def test_all_configs_load():
     files = sorted(glob.glob(os.path.join(CONFIG_DIR, "cond_*.yaml")))
-    assert len(files) == 4, files
+    assert len(files) == len(VALID_CONDITIONS), files
     seen = set()
     for f in files:
         cfg = load_config(f)
@@ -34,7 +34,8 @@ def test_all_configs_load():
 def test_controlled_variables_identical_across_conditions():
     # SPEC §4.4: epoch/lr/warmup/seed/batch 構成は全条件で固定されているべき
     cfgs = {load_config(os.path.join(CONFIG_DIR, f"cond_{c}.yaml")).condition:
-            load_config(os.path.join(CONFIG_DIR, f"cond_{c}.yaml")) for c in "ABCD"}
+            load_config(os.path.join(CONFIG_DIR, f"cond_{c}.yaml"))
+            for c in VALID_CONDITIONS}
     ref = cfgs["A"]
     for c, cfg in cfgs.items():
         assert cfg.num_train_epochs == ref.num_train_epochs, c
