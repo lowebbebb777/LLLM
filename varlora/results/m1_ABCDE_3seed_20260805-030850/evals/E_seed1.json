@@ -1,0 +1,14 @@
+{
+  "condition": "E",
+  "adapter": "outputs/m1_E_seed1/adapter",
+  "scores": {
+    "numeric/scale_consistency": 1.0,
+    "numeric/cpk": 0.0,
+    "numeric/stats_impl": 0.2857142857142857,
+    "numeric/discrete_continuous": 0.21428571428571427,
+    "numeric/overall": 0.375,
+    "path_indep/agreement": 0.7320261437908497,
+    "path_indep/dispersion": 0.11203022159595039,
+    "path_indep/n_problems": 51.0
+  }
+}

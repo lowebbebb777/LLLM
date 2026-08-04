@@ -1,0 +1,37 @@
+# 条件 E: EquilibriumLoRA (等号=情報/エネルギーの釣り合いでゲートを平衡解に「解く」)
+#
+# 弱形式の等号 δF=0 を課す: qw = σ((E_disc - E_cont)/τ)。自由学習ゲート(C)が
+# 交絡対照 B を超えなかったのを受け、「拘束(釣り合い)を入れると構造が効くか」を検証する。
+# 対照は既存の A/B/C/D をそのまま使う (B は 62M でむしろ厳しめ = 保守的な対照)。
+condition: E
+
+model_name: Qwen/Qwen2.5-Coder-7B
+dataset: data/m1_train.jsonl   # A/B/C/D と同一データ (統制変数)
+text_field: text
+max_seq_length: 1024
+output_dir: outputs/cond_E
+
+# アダプタ (VariationalLoRA, equilibrium ゲート)
+r0: 16
+alpha: 32
+lora_dropout: 0.05
+n_quad: 3                 # equilibrium では未使用だが構成整合のため保持
+tau: 1.0                 # sigmoid 温度 (平衡の鋭さ)
+gate_lr_multiplier: 10.0 # エネルギー頭 (energy_cont/energy_disc) を高 LR で学習
+
+use_4bit: true
+
+# 統制変数 (A/B/C/D と同一)
+num_train_epochs: 3.0
+learning_rate: 1.0e-4
+warmup_ratio: 0.03
+lr_scheduler_type: cosine
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+max_grad_norm: 1.0
+gradient_checkpointing: true
+seed: 0
+logging_steps: 20
+save_steps: 200
+fp16: true
+bf16: false

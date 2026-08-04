@@ -1,0 +1,31 @@
+# 条件 A: 標準 LoRA (rank=r0) — ベースライン / 対照群 (SPEC §4.2)
+condition: A
+
+model_name: Qwen/Qwen2.5-Coder-7B
+dataset: data/m1_train.jsonl   # M1 本番データ (scripts/gen_train_data.py で生成)
+text_field: text
+max_seq_length: 1024
+output_dir: outputs/cond_A
+
+# アダプタ
+r0: 16            # 手応え確認フェーズで決めた値 (SPEC §4.2)
+alpha: 32
+lora_dropout: 0.05
+
+# 量子化 (QLoRA)
+use_4bit: true
+
+# 統制変数 (SPEC §4.4: 全条件で固定すること)
+num_train_epochs: 3.0
+learning_rate: 1.0e-4
+warmup_ratio: 0.03
+lr_scheduler_type: cosine
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+max_grad_norm: 1.0
+gradient_checkpointing: true
+seed: 0
+logging_steps: 5
+save_steps: 200
+fp16: true
+bf16: false

@@ -1,0 +1,11 @@
+archive_created=2026-08-05T03:08:50+09:00
+repository=/home/low/PycharmProjects/LLLM
+branch=claude/varlora-spec-review-0pwq4p
+head=ad5d058c70f397f89661f0942cfbfc086a094766
+technical_baseline=9bb488d
+python=Python 3.13.13
+
+[git status]
+## claude/varlora-spec-review-0pwq4p...origin/claude/varlora-spec-review-0pwq4p
+?? ../.idea/
+?? results/
