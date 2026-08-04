@@ -248,3 +248,25 @@ CUDA版PyTorchは環境に合わせて別途導入してください。
 > **新方式が動くことを確認した。次は比較実験で、本当に意味がある方式かを判定する。**
 
 新しい壮大な機構を増やす前に、M1を再現可能な形で実行し、VariationalLoRAが標準LoRAを上回るか決着させることを最優先とします。
+
+---
+
+## Author / 開発者
+
+### Soichiro Oka
+
+#### 日本語
+
+**Soichiro Oka** は、機械工学、CAE、数値シミュレーション、統計解析、ソフトウェア開発を専門とするエンジニア兼独立研究者です。
+
+神戸大学大学院では、移動有限要素法を用いた数値シミュレーションを研究しました。その後、自動車用駆動ベルト、スクロール圧縮機、半導体製造部品の開発に携わり、非線形構造解析、高周波振動解析、FORTRANとCAEの連成解析、統計的品質管理、製造DXなどの技術を構築してきました。
+
+現在は、これらの工学的経験を生かし、限られた計算資源で高度な推論能力を獲得する小型ローカルLLMの研究開発に取り組んでいます。
+
+#### English
+
+**Soichiro Oka** is a mechanical engineer and independent researcher specializing in CAE, numerical simulation, statistical analysis, and software development.
+
+His graduate research at Kobe University focused on numerical simulation using the Moving Finite Element Method. He has since worked on automotive drive systems, scroll compressors, semiconductor manufacturing components, nonlinear structural analysis, high-frequency vibration modeling, coupled FORTRAN–CAE simulations, statistical quality control, and manufacturing digitalization.
+
+He is currently applying this engineering background to the development of compact local language models capable of advanced reasoning under limited computational resources.
