@@ -120,9 +120,13 @@ def test_summarize_and_cohens_d():
     assert abs(d) > 2.0
 
 
+_DATASET_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "data", "numeric_stats_eval", "problems.jsonl"
+)
+
+
 def test_load_seed_dataset():
-    path = os.path.join(os.path.dirname(__file__), "..", "data", "numeric_stats_eval", "problems.jsonl")
-    probs = load_numeric_problems(path)
+    probs = load_numeric_problems(_DATASET_PATH)
     assert len(probs) >= 10, len(probs)
     cats = {p.category for p in probs}
     # SPEC §5.2 の4カテゴリが揃っているか
@@ -130,6 +134,40 @@ def test_load_seed_dataset():
         assert required in cats, (required, cats)
     # 経路独立性 (§5.2b) 用に paraphrases を持つ問題が存在
     assert any(p.paraphrases for p in probs)
+
+
+def test_expanded_dataset_contract():
+    """拡充セットの契約 (SPEC §5.2 / data README) を固定し、退行を防ぐ。
+
+      - 総数 50〜100 問
+      - 各カテゴリ 12 問以上
+      - numeric は全て 2 個以上の paraphrases (経路独立性 §5.2b を測れる)
+      - code は test を持ち、複数 assert で境界条件まで検証
+      - id は一意
+    """
+    probs = load_numeric_problems(_DATASET_PATH)
+    assert 50 <= len(probs) <= 100, f"総数が範囲外: {len(probs)}"
+
+    from collections import Counter
+    cats = Counter(p.category for p in probs)
+    for cat in ("cpk", "stats_impl", "scale_consistency", "discrete_continuous"):
+        assert cats[cat] >= 12, f"{cat} が 12 問未満: {cats[cat]}"
+
+    ids = [p.id for p in probs]
+    assert len(ids) == len(set(ids)), "id が重複している"
+
+    for p in probs:
+        if p.kind == "numeric":
+            assert p.expected is not None, f"{p.id}: numeric に expected 欠落"
+            assert len(p.paraphrases) >= 2, (
+                f"{p.id}: numeric は paraphrases 2 個以上 (§5.2b)"
+            )
+        elif p.kind == "code":
+            assert p.test and p.test.count("assert") >= 2, (
+                f"{p.id}: code の test は複数 assert で境界条件を検証すべき"
+            )
+        else:
+            raise AssertionError(f"{p.id}: 未知の kind {p.kind}")
 
 
 def _run_all():
