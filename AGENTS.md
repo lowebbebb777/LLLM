@@ -70,3 +70,10 @@ powershell -ExecutionPolicy Bypass -File .\deltafem\scripts\run_d1_windows.ps1
 - **dm = 引継ぎ保存**: 途中経過を docs/STATE.md(次の一手)と docs/LOG.md に書いて commit。タスク途中で別AIへ渡す前の強制セーブ。
 - **di = 引継ぎ登録**: 新規repoを規約に登録。
 - **did = アイディアを棚に落とす**: 直前に出た案を、今いる repo の docs/IDEAS.md へ**詩**(散文でない1〜2文)で追記。仕様も手順も書かない。STATE には置かない。横断的な着想を lowebbebb777/Ideas へ集約する場合は明示的に指示すること。
+
+## AIとGitコミット名義（2026-10-31以降）
+
+- Git Author / Committerは、名義使用を認められた実際の人間・正規botのみ。Claude、Codex、GPT等のAI名義やAIの `Co-Authored-By` 自動登録は禁止。
+- コミット前に `git var GIT_AUTHOR_IDENT` と `git var GIT_COMMITTER_IDENT` を確認する。未確認の氏名・メールを推測しない。
+- AIの作業、役割、証拠と人間の指示・承認は `docs/LOG.md` 等に記録する。**過去のGit履歴は変更しない**。
+- 正本: https://github.com/lowebbebb777/dev-conventions/blob/main/docs/COMMIT_ATTRIBUTION.md
