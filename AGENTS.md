@@ -77,3 +77,29 @@ powershell -ExecutionPolicy Bypass -File .\deltafem\scripts\run_d1_windows.ps1
 - コミット前に `git var GIT_AUTHOR_IDENT` と `git var GIT_COMMITTER_IDENT` を確認する。未確認の氏名・メールを推測しない。
 - AIの作業、役割、証拠と人間の指示・承認は `docs/LOG.md` 等に記録する。**過去のGit履歴は変更しない**。
 - 正本: https://github.com/lowebbebb777/dev-conventions/blob/main/docs/COMMIT_ATTRIBUTION.md
+
+## 共通実行・権限規約（2026-11-17同期）
+
+本節は、Git操作の承認、リスク別QA、作業記録の頻度に関する古い一般運用記述を置き換える。研究・製品固有の設計、不変条件、実験手順、既存の明示的な個別契約は維持する。共通正本:
+- [dev-conventions/AGENTS.md](https://github.com/lowebbebb777/dev-conventions/blob/main/AGENTS.md)
+- [開発思想とリスク別統合条件](https://github.com/lowebbebb777/dev-conventions/blob/main/docs/DEVELOPMENT_PHILOSOPHY.md)
+
+### Git操作と自律範囲
+- 通常の作業ブランチ作成・push・PR作成にOwnerの事前承認は不要。mainへの直接pushはしない。
+- 低リスクは自己確認＋関連テスト＋CI成功後、中リスクはCI＋対象回帰＋PRレビュー1回の成功後にAIが統合する。いずれもOwner事前承認は原則不要。
+- 高リスク（認証・権限・秘密・プライバシー・課金・データ移行/消失・自動起動・本番公開）は独立QAと必要な境界/異常系/実機確認を行い、Owner事前承認を得る。
+- 要求・設計・受入基準・作業範囲の変更、公開・出荷・支出・有料API、機密情報の外部送信、不可逆/破壊的操作はOwnerへ事前確認する。
+- CIが通らない場合は原因を調べて修正する。低・中リスクの条件を満たしたPRを形式的なOwner確認待ちで止めない。
+
+### 作業・記録・テスト
+- 1 Step = 1 commitを強制しない。まとまった成果単位でcommitする。
+- STATEは現在地が実際に変わったときだけ更新し50行以内を維持する。LOGは重要な判断・承認・逸脱・検証だけ追記する。毎Stepの定型更新をしない。
+- 変更リスクに応じてテストを選ぶ。小変更に全回帰・毎Stepビルド・独立QAを儀式として課さない。
+- 不具合・コアロジックでは可能な限り修正前FAILを確認するが、すべての新規テストに一律適用しない。
+- PASS / FAIL / SKIP / NOT_RUN / UNVERIFIEDを区別し、未実施をPASSにしない。自己確認を独立QAと呼ばない。
+- force push、公開履歴改変、実データ削除はOwner事前承認。問題時はロールバックを選択肢にする。
+
+この共通規約は、研究・製品固有条件や個別Issue/承認済み契約を解除しない。
+
+### 固有条件の維持
+- LLLM固有条件：READMEとdeltafem/RESEARCH_PLAN.mdを研究正典とする。結論は棄却可能な比較実験に基づけ、CPU/toy検証をGPU実測・Transformer高速化実証へ読み替えない。VariationalLoRAは既存決定どおり凍結資産として扱う。GPU時間・有料計算・外部データ送信は別途承認対象。
