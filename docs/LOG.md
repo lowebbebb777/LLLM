@@ -13,3 +13,10 @@
 - 逸脱・追加・スキップ: なし
 - 検証: python -m unittest tests/test_conventions.py 5件全件 PASS。
 - 申し送り: なし
+
+## 2026-11-17 GPT-6 — 共通実行規約同期
+
+- やったこと: AGENTS.mdへ共通のリスク別Git/QA/統合条件と記録・テスト頻度を同期。
+- 固有条件: README/DeltaFEM研究計画の正典、棄却可能な実験根拠、VariationalLoRA凍結、GPU費用・外部データ送信境界を維持。
+- 逸脱・スキップ: README/STATE/研究コード/依存は変更なし。テストは文書のみの変更のためPR上のCIを待つ。
+- 検証: AGENTS.md読み戻しを実施予定。研究実験・GPU実測はNOT_RUN。
